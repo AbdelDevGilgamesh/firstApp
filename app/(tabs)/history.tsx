@@ -1,14 +1,56 @@
+import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { EmptyState } from '@/src/components/EmptyState';
 import { FoodRow } from '@/src/components/FoodRow';
 import { Screen } from '@/src/components/Screen';
-import { formatDateLabel } from '@/src/date';
+import { formatDateLabel, getDateKey } from '@/src/date';
 import { useCalories } from '@/src/context/CalorieContext';
+import { FoodEntry } from '@/src/types';
+
+type GoalStatus = 'Under goal' | 'Goal reached' | 'Over goal';
+
+type WeeklyDay = {
+  date: string;
+  label: string;
+  totalCalories: number;
+  status: GoalStatus;
+};
+
+type WeeklyStats = {
+  averageCalories: number;
+  days: WeeklyDay[];
+  highestDay: WeeklyDay | null;
+  trackedDaysCount: number;
+  totalCalories: number;
+};
+
+function getStartOfWeek(date = new Date()) {
+  const start = new Date(date);
+  const day = start.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() + mondayOffset);
+
+  return start;
+}
+
+function getGoalStatus(totalCalories: number, dailyGoal: number): GoalStatus {
+  if (totalCalories > dailyGoal) {
+    return 'Over goal';
+  }
+
+  if (totalCalories === dailyGoal) {
+    return 'Goal reached';
+  }
+
+  return 'Under goal';
+}
 
 export default function HistoryScreen() {
-  const { daySummaries, isLoading } = useCalories();
+  const { dailyGoal, daySummaries, deleteFood, entries, isLoading } = useCalories();
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const activeDate = selectedDate ?? daySummaries[0]?.date ?? null;
 
@@ -16,6 +58,59 @@ export default function HistoryScreen() {
     () => daySummaries.find((summary) => summary.date === activeDate),
     [activeDate, daySummaries],
   );
+
+  const weeklyStats = useMemo(() => {
+    const totalsByDate = entries.reduce<Record<string, number>>((accumulator, entry) => {
+      accumulator[entry.date] = (accumulator[entry.date] ?? 0) + entry.calories;
+      return accumulator;
+    }, {});
+    const startOfWeek = getStartOfWeek();
+    const days: WeeklyDay[] = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(startOfWeek);
+      date.setDate(startOfWeek.getDate() + index);
+
+      const dateKey = getDateKey(date);
+      const totalCalories = totalsByDate[dateKey] ?? 0;
+
+      return {
+        date: dateKey,
+        label: new Intl.DateTimeFormat(undefined, { weekday: 'short' }).format(date),
+        totalCalories,
+        status: getGoalStatus(totalCalories, dailyGoal),
+      };
+    });
+    const trackedDays = days.filter((day) => day.totalCalories > 0);
+    const totalCalories = days.reduce((total, day) => total + day.totalCalories, 0);
+    const highestDay = trackedDays.reduce<WeeklyDay | null>(
+      (highest, day) => (!highest || day.totalCalories > highest.totalCalories ? day : highest),
+      null,
+    );
+
+    return {
+      averageCalories: trackedDays.length > 0 ? Math.round(totalCalories / trackedDays.length) : 0,
+      days,
+      highestDay,
+      trackedDaysCount: trackedDays.length,
+      totalCalories,
+    };
+  }, [dailyGoal, entries]);
+
+  function handleEdit(entry: FoodEntry) {
+    router.push({ pathname: '/add', params: { entryId: entry.id } });
+  }
+
+  function handleDelete(entry: FoodEntry) {
+    Alert.alert('Delete food?', `Remove ${entry.name} from ${formatDateLabel(entry.date)}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          deleteFood(entry.id);
+        },
+      },
+    ]);
+  }
 
   if (isLoading) {
     return (
@@ -28,6 +123,7 @@ export default function HistoryScreen() {
   if (daySummaries.length === 0) {
     return (
       <Screen>
+        <WeeklyStatsSection stats={weeklyStats} />
         <EmptyState title="No history yet" message="Saved foods are grouped by day automatically." />
       </Screen>
     );
@@ -35,6 +131,8 @@ export default function HistoryScreen() {
 
   return (
     <Screen>
+      <WeeklyStatsSection stats={weeklyStats} />
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Previous days</Text>
         {daySummaries.map((summary) => {
@@ -71,11 +169,62 @@ export default function HistoryScreen() {
             <Text style={styles.total}>{selectedDay.totalCalories} cal</Text>
           </View>
           {selectedDay.entries.map((entry) => (
-            <FoodRow key={entry.id} entry={entry} />
+            <FoodRow key={entry.id} entry={entry} onDelete={handleDelete} onEdit={handleEdit} />
           ))}
         </View>
       ) : null}
     </Screen>
+  );
+}
+
+function WeeklyStatsSection({ stats }: { stats: WeeklyStats }) {
+  return (
+    <View style={styles.weeklyCard}>
+      <View style={styles.weeklyHeader}>
+        <Text style={styles.sectionTitle}>This week</Text>
+        <Text style={styles.weeklySubtle}>{stats.trackedDaysCount} days tracked</Text>
+      </View>
+
+      <View style={styles.statGrid}>
+        <View style={styles.statTile}>
+          <Text style={styles.statLabel}>Total</Text>
+          <Text style={styles.statValue}>{stats.totalCalories} cal</Text>
+        </View>
+        <View style={styles.statTile}>
+          <Text style={styles.statLabel}>Average/day</Text>
+          <Text style={styles.statValue}>{stats.averageCalories} cal</Text>
+        </View>
+        <View style={styles.statTile}>
+          <Text style={styles.statLabel}>Highest day</Text>
+          <Text style={styles.statValue}>
+            {stats.highestDay ? `${stats.highestDay.label}: ${stats.highestDay.totalCalories}` : 'None yet'}
+          </Text>
+        </View>
+        <View style={styles.statTile}>
+          <Text style={styles.statLabel}>Tracked</Text>
+          <Text style={styles.statValue}>{stats.trackedDaysCount} / 7 days</Text>
+        </View>
+      </View>
+
+      <View style={styles.weekList}>
+        {stats.days.map((day) => (
+          <View key={day.date} style={styles.weekDayRow}>
+            <Text style={styles.weekDayLabel}>{day.label}</Text>
+            <View style={styles.weekDayMeta}>
+              <Text style={styles.weekDayCalories}>{day.totalCalories} cal</Text>
+              <Text
+                style={[
+                  styles.goalStatus,
+                  day.status === 'Goal reached' && styles.goalStatusReached,
+                  day.status === 'Over goal' && styles.goalStatusOver,
+                ]}>
+                {day.status}
+              </Text>
+            </View>
+          </View>
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -136,5 +285,90 @@ const styles = StyleSheet.create({
     color: '#2E7D57',
     fontSize: 16,
     fontWeight: '900',
+  },
+  weeklyCard: {
+    gap: 16,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    padding: 16,
+    shadowColor: '#1E1F24',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  weeklyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  weeklySubtle: {
+    color: '#6B6F76',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  statGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  statTile: {
+    minWidth: '47%',
+    flex: 1,
+    borderRadius: 8,
+    backgroundColor: '#F7F7F2',
+    padding: 12,
+  },
+  statLabel: {
+    color: '#6B6F76',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  statValue: {
+    marginTop: 6,
+    color: '#1E1F24',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  weekList: {
+    gap: 8,
+  },
+  weekDayRow: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    borderRadius: 8,
+    backgroundColor: '#FAFAF7',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  weekDayLabel: {
+    color: '#1E1F24',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  weekDayMeta: {
+    alignItems: 'flex-end',
+    gap: 2,
+  },
+  weekDayCalories: {
+    color: '#1E1F24',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  goalStatus: {
+    color: '#2E7D57',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  goalStatusReached: {
+    color: '#2563eb',
+  },
+  goalStatusOver: {
+    color: '#B95C3A',
   },
 });

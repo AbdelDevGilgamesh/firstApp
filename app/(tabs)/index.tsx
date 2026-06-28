@@ -1,4 +1,5 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { router } from 'expo-router';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 
 import { EmptyState } from '@/src/components/EmptyState';
 import { FoodRow } from '@/src/components/FoodRow';
@@ -6,20 +7,58 @@ import { Screen } from '@/src/components/Screen';
 import { StatCard } from '@/src/components/StatCard';
 import { getDateKey } from '@/src/date';
 import { useCalories } from '@/src/context/CalorieContext';
+import { FoodEntry } from '@/src/types';
 
 export default function HomeScreen() {
-  const { dailyGoal, getEntriesForDate, getTotalForDate, isLoading } = useCalories();
+  const { dailyGoal, deleteFood, getEntriesForDate, getTotalForDate, isLoading } = useCalories();
   const today = getDateKey();
   const entries = getEntriesForDate(today);
   const totalCalories = getTotalForDate(today);
   const remainingCalories = dailyGoal - totalCalories;
+  const progressPercent = dailyGoal > 0 ? Math.round((totalCalories / dailyGoal) * 100) : 0;
+  const progressBarPercent = Math.min(progressPercent, 100);
+  const calorieStatus =
+    remainingCalories >= 0
+      ? `${remainingCalories} calories remaining`
+      : `${Math.abs(remainingCalories)} calories over goal`;
+
+  function handleEdit(entry: FoodEntry) {
+    router.push({ pathname: '/add', params: { entryId: entry.id } });
+  }
+
+  function handleDelete(entry: FoodEntry) {
+    Alert.alert('Delete food?', `Remove ${entry.name} from today?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          deleteFood(entry.id);
+        },
+      },
+    ]);
+  }
 
   return (
     <Screen>
       <View style={styles.hero}>
         <Text style={styles.eyebrow}>Today</Text>
         <Text style={styles.title}>{totalCalories} calories</Text>
-        <Text style={styles.subtitle}>Daily goal: {dailyGoal} cal</Text>
+        <Text style={styles.subtitle}>
+          {totalCalories} / {dailyGoal} cal = {progressPercent}%
+        </Text>
+        <View style={styles.progressTrack}>
+          <View
+            style={[
+              styles.progressFill,
+              remainingCalories < 0 && styles.progressFillOver,
+              { width: `${progressBarPercent}%` },
+            ]}
+          />
+        </View>
+        <Text style={[styles.status, remainingCalories < 0 && styles.statusOver]}>
+          {calorieStatus}
+        </Text>
       </View>
 
       <View style={styles.stats}>
@@ -41,7 +80,9 @@ export default function HomeScreen() {
       ) : entries.length === 0 ? (
         <EmptyState title="No foods yet" message="Add your first food to start tracking today." />
       ) : (
-        entries.map((entry) => <FoodRow key={entry.id} entry={entry} />)
+        entries.map((entry) => (
+          <FoodRow key={entry.id} entry={entry} onDelete={handleDelete} onEdit={handleEdit} />
+        ))
       )}
     </Screen>
   );
@@ -74,6 +115,30 @@ const styles = StyleSheet.create({
     marginTop: 6,
     color: '#6B6F76',
     fontSize: 15,
+  },
+  progressTrack: {
+    height: 12,
+    marginTop: 18,
+    overflow: 'hidden',
+    borderRadius: 8,
+    backgroundColor: '#E5E7EB',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
+  },
+  progressFillOver: {
+    backgroundColor: '#B95C3A',
+  },
+  status: {
+    marginTop: 10,
+    color: '#2E7D57',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  statusOver: {
+    color: '#B95C3A',
   },
   stats: {
     flexDirection: 'row',
