@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { EmptyState } from '@/src/components/EmptyState';
 import { FoodRow } from '@/src/components/FoodRow';
@@ -100,16 +100,7 @@ export default function HistoryScreen() {
   }
 
   function handleDelete(entry: FoodEntry) {
-    Alert.alert('Delete food?', `Remove ${entry.name} from ${formatDateLabel(entry.date)}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => {
-          deleteFood(entry.id);
-        },
-      },
-    ]);
+    deleteFood(entry.id);
   }
 
   if (isLoading) {

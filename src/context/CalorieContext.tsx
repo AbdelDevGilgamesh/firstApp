@@ -1,6 +1,20 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createContext, PropsWithChildren, useContext, useEffect, useMemo, useState } from 'react';
 
 import { getDateKey } from '@/src/date';
+import { Database } from '@/src/lib/supabase';
+import {
+  create as createFoodEntry,
+  listByUserId as listFoodEntriesByUserId,
+  remove as removeFoodEntry,
+  update as updateFoodEntry,
+} from '@/src/services/foodEntriesDbService';
+import {
+  create as createCustomFood,
+  listByUserId as listCustomFoodsByUserId,
+  remove as removeCustomFood,
+} from '@/src/services/customFoodsDbService';
+import { create as createMeal } from '@/src/services/mealsDbService';
 import {
   DEFAULT_DAILY_GOAL,
   loadDailyGoal,
@@ -18,6 +32,9 @@ import {
 } from '@/src/storage';
 import { DaySummary, FoodEntry, FoodTemplate, MealIngredient, MealTemplate } from '@/src/types';
 
+type FoodEntryRow = Database['public']['Tables']['food_entries']['Row'];
+type CustomFoodRow = Database['public']['Tables']['custom_foods']['Row'];
+
 type FoodDetailsInput = {
   foodKey?: string;
   name: string;
@@ -33,6 +50,7 @@ type FoodDetailsInput = {
   baseProtein?: number;
   baseCarbs?: number;
   baseFat?: number;
+  source?: string;
 };
 
 type AddFoodInput = FoodDetailsInput;
@@ -50,6 +68,7 @@ type AddTemplateInput = {
   carbs: number;
   fat: number;
   keywords?: string[];
+  servingPresets?: FoodTemplate['servingPresets'];
   source?: 'custom' | 'barcode';
 };
 
@@ -84,6 +103,233 @@ type CalorieContextValue = {
 };
 
 const CalorieContext = createContext<CalorieContextValue | undefined>(undefined);
+const TEST_PROFILE_ID_KEY = 'testProfileId';
+const LEGACY_TEST_PROFILE_ID_KEY = 'calorie-tracker.test-profile-id';
+
+async function loadTestProfileId() {
+  try {
+    return (
+      (await AsyncStorage.getItem(TEST_PROFILE_ID_KEY)) ??
+      (await AsyncStorage.getItem(LEGACY_TEST_PROFILE_ID_KEY))
+    );
+  } catch (error) {
+    console.warn('Failed to load testProfileId for food entry sync.', error);
+    return null;
+  }
+}
+
+function getEntrySource(input: FoodDetailsInput) {
+  if (input.source) {
+    return input.source;
+  }
+
+  if (input.foodKey?.startsWith('meal:')) {
+    return 'meal';
+  }
+
+  if (input.foodKey) {
+    return 'food';
+  }
+
+  return 'manual';
+}
+
+function normalizeFoodKey(value?: string) {
+  return value?.trim() || `manual:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeTemplateKey(template: FoodTemplate) {
+  return (
+    template.supabaseId ??
+    template.foodKey ??
+    template.id ??
+    template.name
+      .toLowerCase()
+      .trim()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+  );
+}
+
+function toFiniteNumber(value: unknown, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isUuid(value: unknown) {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  );
+}
+
+function getRemoteId(item?: { id?: string; supabaseId?: string }) {
+  if (!item) {
+    return null;
+  }
+
+  return item.supabaseId ?? (isUuid(item.id) ? item.id : null);
+}
+
+function mapDbFoodEntry(row: FoodEntryRow): FoodEntry {
+  const createdAt = row.created_at;
+
+  return {
+    id: row.id,
+    localId: row.id,
+    supabaseId: row.id,
+    remoteId: row.id,
+    foodKey: row.food_key ?? undefined,
+    name: row.name,
+    calories: row.calories,
+    quantity: row.quantity ?? undefined,
+    quantityValue: row.quantity_value ?? undefined,
+    unit: row.unit ?? undefined,
+    protein: row.protein ?? undefined,
+    carbs: row.carbs ?? undefined,
+    fat: row.fat ?? undefined,
+    baseQuantity: row.base_quantity ?? undefined,
+    baseCalories: row.base_calories ?? undefined,
+    baseProtein: row.base_protein ?? undefined,
+    baseCarbs: row.base_carbs ?? undefined,
+    baseFat: row.base_fat ?? undefined,
+    source: row.source ?? undefined,
+    date: row.entry_date ?? createdAt.slice(0, 10),
+    createdAt,
+  };
+}
+
+function mapDbCustomFood(row: CustomFoodRow): FoodTemplate {
+  const servingPresets = Array.isArray(row.serving_presets)
+    ? (row.serving_presets as FoodTemplate['servingPresets'])
+    : undefined;
+
+  return {
+    id: row.id,
+    localId: row.id,
+    supabaseId: row.id,
+    foodKey: row.food_key ?? undefined,
+    barcode: row.barcode ?? undefined,
+    name: row.name,
+    category: row.category ?? 'Custom foods',
+    baseQuantity: Number(row.base_quantity ?? 100),
+    unit: row.unit ?? 'g',
+    baseCalories: Math.round(Number(row.calories ?? row.base_calories ?? 0)),
+    protein: Number(row.protein ?? 0),
+    carbs: Number(row.carbs ?? 0),
+    fat: Number(row.fat ?? 0),
+    keywords: row.keywords ?? [],
+    servingPresets,
+    source: row.source ?? 'custom',
+    createdAt: row.created_at,
+  };
+}
+
+function mergeFoodTemplates(localTemplates: FoodTemplate[], remoteTemplates: FoodTemplate[]) {
+  const templatesByKey = new Map<string, FoodTemplate>();
+
+  for (const template of localTemplates) {
+    templatesByKey.set(normalizeTemplateKey(template), template);
+  }
+
+  for (const template of remoteTemplates) {
+    templatesByKey.set(normalizeTemplateKey(template), template);
+  }
+
+  return Array.from(templatesByKey.values()).sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt),
+  );
+}
+
+function mapCustomFoodToDbInsert(customFood: FoodTemplate, userId: string) {
+  const generatedKey = customFood.foodKey ?? customFood.id ?? normalizeFoodKey(customFood.name);
+
+  return {
+    user_id: userId,
+    food_key: customFood.foodKey ?? customFood.id ?? generatedKey,
+    name: customFood.name,
+    category: customFood.category ?? 'Custom foods',
+    base_quantity: Number(customFood.baseQuantity ?? 100),
+    unit: customFood.unit ?? 'g',
+    calories: Math.round(customFood.baseCalories),
+    protein: Number(customFood.protein ?? 0),
+    carbs: Number(customFood.carbs ?? 0),
+    fat: Number(customFood.fat ?? 0),
+    source: 'custom' as const,
+    keywords: customFood.keywords ?? [],
+    created_at: customFood.createdAt,
+  };
+}
+
+function mapFoodEntryToDbInsert(entry: FoodEntry, userId: string) {
+  const flexibleEntry = entry as FoodEntry & Record<string, unknown>;
+  const quantityValue = toFiniteNumber(
+    entry.quantityValue ?? flexibleEntry.quantityValue ?? flexibleEntry.quantity,
+    1,
+  );
+  const quantityText =
+    typeof flexibleEntry.quantityText === 'string'
+      ? flexibleEntry.quantityText
+      : typeof entry.quantity === 'string'
+        ? entry.quantity
+        : `${quantityValue} ${entry.unit ?? ''}`.trim();
+  const entryDate =
+    typeof flexibleEntry.entryDate === 'string'
+      ? flexibleEntry.entryDate
+      : typeof flexibleEntry.entry_date === 'string'
+        ? flexibleEntry.entry_date
+        : entry.date ?? new Date().toISOString().slice(0, 10);
+
+  return {
+    user_id: userId,
+    food_key:
+      entry.foodKey ??
+      (typeof flexibleEntry.foodId === 'string' ? flexibleEntry.foodId : undefined) ??
+      entry.remoteId ??
+      entry.id,
+    name: entry.name,
+    source: entry.source ?? null,
+    calories: Math.round(entry.calories),
+    quantity: quantityText,
+    quantity_value: quantityValue,
+    unit: entry.unit ?? 'serving',
+    protein: Number(entry.protein ?? 0),
+    carbs: Number(entry.carbs ?? 0),
+    fat: Number(entry.fat ?? 0),
+    base_quantity: toFiniteNumber(entry.baseQuantity ?? entry.quantityValue, quantityValue),
+    base_calories: Math.round(entry.baseCalories ?? entry.calories),
+    base_protein: Number(entry.baseProtein ?? entry.protein ?? 0),
+    base_carbs: Number(entry.baseCarbs ?? entry.carbs ?? 0),
+    base_fat: Number(entry.baseFat ?? entry.fat ?? 0),
+    entry_date: entryDate,
+    created_at: entry.createdAt,
+  };
+}
+
+function mapFoodDetailsToDbUpdate(input: UpdateFoodInput) {
+  const quantityValue = Number(input.quantityValue ?? 1);
+
+  return {
+    food_key: input.foodKey ?? normalizeFoodKey(input.name),
+    name: input.name.trim(),
+    source: getEntrySource(input),
+    calories: Math.round(input.calories),
+    quantity: input.quantity?.trim() || `${quantityValue} ${input.unit ?? ''}`.trim(),
+    quantity_value: Number.isFinite(quantityValue) ? quantityValue : 1,
+    unit: input.unit?.trim() || 'serving',
+    protein: Number(input.protein ?? 0),
+    carbs: Number(input.carbs ?? 0),
+    fat: Number(input.fat ?? 0),
+    base_quantity: Number(input.baseQuantity ?? input.quantityValue ?? 1),
+    base_calories: Math.round(input.baseCalories ?? input.calories),
+    base_protein: Number(input.baseProtein ?? input.protein ?? 0),
+    base_carbs: Number(input.baseCarbs ?? input.carbs ?? 0),
+    base_fat: Number(input.baseFat ?? input.fat ?? 0),
+  };
+}
 
 export function CalorieProvider({ children }: PropsWithChildren) {
   const [entries, setEntries] = useState<FoodEntry[]>([]);
@@ -123,6 +369,32 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           setMealTemplates(storedMealTemplates);
           setPinnedFoodKeys(storedPinnedKeys);
           setFoodUsageCounts(storedUsageCounts);
+          setIsLoading(false);
+        }
+
+        const testProfileId = await loadTestProfileId();
+
+        if (!testProfileId) {
+          return;
+        }
+
+        const dbEntries = await listFoodEntriesByUserId(testProfileId);
+
+        if (dbEntries !== null && isMounted) {
+          const syncedEntries = dbEntries.map(mapDbFoodEntry);
+          setEntries(syncedEntries);
+          await saveFoodEntries(syncedEntries);
+        }
+
+        const dbCustomFoods = await listCustomFoodsByUserId(testProfileId);
+
+        if (dbCustomFoods !== null && isMounted) {
+          const syncedTemplates = mergeFoodTemplates(
+            storedTemplates,
+            dbCustomFoods.map(mapDbCustomFood),
+          );
+          setFoodTemplates(syncedTemplates);
+          await saveFoodTemplates(syncedTemplates);
         }
       } finally {
         if (isMounted) {
@@ -142,7 +414,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
     const now = new Date();
     const nextEntry: FoodEntry = {
       id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
-      foodKey: input.foodKey,
+      foodKey: normalizeFoodKey(input.foodKey ?? input.name),
       name: input.name.trim(),
       calories: input.calories,
       quantity: input.quantity?.trim() || undefined,
@@ -156,6 +428,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       baseProtein: input.baseProtein,
       baseCarbs: input.baseCarbs,
       baseFat: input.baseFat,
+      source: getEntrySource(input),
       date: getDateKey(now),
       createdAt: now.toISOString(),
     };
@@ -167,12 +440,48 @@ export function CalorieProvider({ children }: PropsWithChildren) {
     if (input.foodKey) {
       await incrementFoodUsage(input.foodKey);
     }
+
+    const testProfileId = await loadTestProfileId();
+
+    if (!testProfileId) {
+      return;
+    }
+
+    const foodEntryPayload = mapFoodEntryToDbInsert(nextEntry, testProfileId);
+    const { data: dbEntry, error } = await createFoodEntry(foodEntryPayload);
+
+    if (!dbEntry) {
+      if (error) {
+        console.error('Food entry Supabase sync error', {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code,
+        });
+      }
+      return;
+    }
+
+    const syncedEntry = mapDbFoodEntry(dbEntry as FoodEntryRow);
+    const syncedEntries = nextEntries.map((entry) =>
+      entry.id === nextEntry.id
+        ? {
+            ...syncedEntry,
+            localId: entry.localId ?? entry.id,
+          }
+        : entry,
+    );
+
+    setEntries(syncedEntries);
+    await saveFoodEntries(syncedEntries);
   }
 
   async function addFoodTemplate(input: AddTemplateInput) {
     const now = new Date();
+    const foodKey = normalizeFoodKey(input.name);
     const nextTemplate: FoodTemplate = {
       id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+      foodKey,
       barcode: input.barcode,
       name: input.name.trim(),
       category: input.category,
@@ -183,6 +492,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       carbs: input.carbs,
       fat: input.fat,
       keywords: input.keywords,
+      servingPresets: input.servingPresets,
       source: input.source ?? 'custom',
       createdAt: now.toISOString(),
     };
@@ -191,14 +501,56 @@ export function CalorieProvider({ children }: PropsWithChildren) {
     setFoodTemplates(nextTemplates);
     await saveFoodTemplates(nextTemplates);
 
-    return nextTemplate;
+    if ((input.source ?? 'custom') !== 'custom') {
+      return nextTemplate;
+    }
+
+    const testProfileId = await loadTestProfileId();
+
+    if (!testProfileId) {
+      return nextTemplate;
+    }
+
+    const customFoodPayload = mapCustomFoodToDbInsert(nextTemplate, testProfileId);
+    const { data: dbCustomFood, error } = await createCustomFood(customFoodPayload);
+
+    if (!dbCustomFood) {
+      if (error) {
+        console.error('Custom food Supabase error', error);
+      }
+      return nextTemplate;
+    }
+
+    const syncedTemplate = {
+      ...mapDbCustomFood(dbCustomFood as CustomFoodRow),
+      localId: nextTemplate.localId ?? nextTemplate.id,
+    };
+    const syncedTemplates = nextTemplates.map((template) =>
+      template.id === nextTemplate.id ? syncedTemplate : template,
+    );
+
+    setFoodTemplates(syncedTemplates);
+    await saveFoodTemplates(syncedTemplates);
+
+    return syncedTemplate;
   }
 
   async function deleteFoodTemplate(id: string) {
+    const targetTemplate = foodTemplates.find((template) => template.id === id);
     const nextTemplates = foodTemplates.filter((template) => template.id !== id);
 
     setFoodTemplates(nextTemplates);
     await saveFoodTemplates(nextTemplates);
+
+    const remoteId = getRemoteId(targetTemplate);
+
+    if (!remoteId) {
+      return;
+    }
+
+    const removed = await removeCustomFood(remoteId);
+
+    void removed;
   }
 
   async function addMealTemplate(input: AddMealTemplateInput) {
@@ -231,7 +583,75 @@ export function CalorieProvider({ children }: PropsWithChildren) {
     setMealTemplates(nextTemplates);
     await saveMealTemplates(nextTemplates);
 
-    return nextTemplate;
+    const testProfileId = await loadTestProfileId();
+
+    if (!testProfileId) {
+      return nextTemplate;
+    }
+
+    const mealPayload = {
+      user_id: testProfileId,
+      name: nextTemplate.name,
+      category: nextTemplate.category,
+      source: 'meal',
+      base_quantity: nextTemplate.baseQuantity,
+      unit: nextTemplate.unit,
+      calories: nextTemplate.calories,
+      protein: nextTemplate.protein,
+      carbs: nextTemplate.carbs,
+      fat: nextTemplate.fat,
+      keywords: nextTemplate.keywords,
+      created_at: nextTemplate.createdAt,
+    };
+    const ingredientPayloads = nextTemplate.ingredients.map((ingredient) => ({
+      user_id: testProfileId,
+      meal_id: nextTemplate.id,
+      food_id: ingredient.foodId,
+      source: ingredient.foodId.split(':')[0] || 'local',
+      name: ingredient.name,
+      quantity: ingredient.quantity,
+      unit: ingredient.unit,
+      calories: ingredient.calories,
+      protein: ingredient.protein,
+      carbs: ingredient.carbs,
+      fat: ingredient.fat,
+      base_quantity: ingredient.baseQuantity ?? ingredient.quantity,
+      base_calories: ingredient.baseCalories ?? ingredient.calories,
+      base_protein: ingredient.baseProtein ?? ingredient.protein,
+      base_carbs: ingredient.baseCarbs ?? ingredient.carbs,
+      base_fat: ingredient.baseFat ?? ingredient.fat,
+      created_at: nextTemplate.createdAt,
+    }));
+    const mealIngredientPayloads = ingredientPayloads.map(({ meal_id: _mealId, ...ingredient }) => ingredient);
+
+    const { data: dbMeal, error } = await createMeal(mealPayload, mealIngredientPayloads);
+
+    if (!dbMeal) {
+      if (error) {
+        console.error('Meal Supabase sync error', {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code,
+        });
+      }
+      return nextTemplate;
+    }
+
+    const syncedMeal: MealTemplate = {
+      ...nextTemplate,
+      localId: nextTemplate.localId ?? nextTemplate.id,
+      supabaseId: dbMeal.id,
+      ingredients: nextTemplate.ingredients,
+    };
+    const syncedTemplates = nextTemplates.map((template) =>
+      template.id === nextTemplate.id ? syncedMeal : template,
+    );
+
+    setMealTemplates(syncedTemplates);
+    await saveMealTemplates(syncedTemplates);
+
+    return syncedMeal;
   }
 
   async function togglePinnedFood(foodKey: string) {
@@ -272,6 +692,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
             baseProtein: input.baseProtein,
             baseCarbs: input.baseCarbs,
             baseFat: input.baseFat,
+            source: getEntrySource(input),
           }
         : entry,
     );
@@ -282,13 +703,53 @@ export function CalorieProvider({ children }: PropsWithChildren) {
     if (input.foodKey) {
       await incrementFoodUsage(input.foodKey);
     }
+
+    const targetEntry = entries.find((entry) => entry.id === id);
+    const updatedLocalEntry = nextEntries.find((entry) => entry.id === id);
+    const remoteId = getRemoteId(targetEntry);
+    let dbEntry = null;
+
+    if (remoteId) {
+      const updatePayload = mapFoodDetailsToDbUpdate(input);
+      dbEntry = await updateFoodEntry(remoteId, updatePayload);
+    } else if (updatedLocalEntry) {
+      const testProfileId = await loadTestProfileId();
+
+      if (testProfileId) {
+        const payload = mapFoodEntryToDbInsert(updatedLocalEntry, testProfileId);
+        const result = await createFoodEntry(payload);
+        dbEntry = result.data;
+      }
+    }
+
+    if (!dbEntry) {
+      return;
+    }
+
+    const syncedEntry = mapDbFoodEntry(dbEntry as FoodEntryRow);
+    const syncedEntries = nextEntries.map((entry) =>
+      entry.id === id ? { ...syncedEntry, localId: entry.localId ?? entry.id } : entry,
+    );
+
+    setEntries(syncedEntries);
+    await saveFoodEntries(syncedEntries);
   }
 
   async function deleteFood(id: string) {
+    const targetEntry = entries.find((entry) => entry.id === id);
     const nextEntries = entries.filter((entry) => entry.id !== id);
 
     setEntries(nextEntries);
     await saveFoodEntries(nextEntries);
+
+    const remoteId = getRemoteId(targetEntry);
+
+    if (!remoteId) {
+      return;
+    }
+
+    const removed = await removeFoodEntry(remoteId);
+    void removed;
   }
 
   async function updateDailyGoal(goal: number) {

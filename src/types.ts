@@ -10,6 +10,9 @@ export type ServingPreset = {
 
 export type FoodEntry = {
   id: string;
+  localId?: string;
+  supabaseId?: string;
+  remoteId?: string;
   foodKey?: string;
   name: string;
   calories: number;
@@ -24,12 +27,16 @@ export type FoodEntry = {
   baseProtein?: number;
   baseCarbs?: number;
   baseFat?: number;
+  source?: string;
   date: string;
   createdAt: string;
 };
 
 export type FoodTemplate = {
   id: string;
+  localId?: string;
+  supabaseId?: string;
+  foodKey?: string;
   barcode?: string;
   name: string;
   category?: string;
@@ -46,6 +53,9 @@ export type FoodTemplate = {
 };
 
 export type MealIngredient = {
+  id?: string;
+  localId?: string;
+  supabaseId?: string;
   foodId: string;
   name: string;
   quantity: number;
@@ -63,6 +73,8 @@ export type MealIngredient = {
 
 export type MealTemplate = {
   id: string;
+  localId?: string;
+  supabaseId?: string;
   name: string;
   category: 'Meals';
   ingredients: MealIngredient[];

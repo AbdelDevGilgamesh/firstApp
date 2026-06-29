@@ -1,9 +1,12 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
-import { useEffect, useMemo, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -16,6 +19,7 @@ import {
 
 import { Screen } from '@/src/components/Screen';
 import { useCalories } from '@/src/context/CalorieContext';
+import { useTokens } from '@/src/context/TokenContext';
 import {
   DEFAULT_FOODS,
   FoodDefinition,
@@ -23,7 +27,9 @@ import {
   templateToFoodDefinition,
 } from '@/src/foods';
 import { MealIngredient, ServingPreset } from '@/src/types';
+import { create as createScannedFood } from '@/src/services/scannedFoodsDbService';
 import { normalizeText, searchFoods } from '@/src/utils/foodSearch';
+import { getFoodFormErrors, hasErrors, validateName } from '@/src/utils/validation';
 
 const MAX_SEARCH_RESULTS = 30;
 const OPEN_FOOD_FACTS_FIELDS = [
@@ -45,6 +51,8 @@ const PRIORITY_CATEGORIES = [
   'Drinks',
   'Prepared meals',
 ];
+const TEST_PROFILE_ID_KEY = 'testProfileId';
+const LEGACY_TEST_PROFILE_ID_KEY = 'calorie-tracker.test-profile-id';
 
 function toNumber(value: string) {
   const parsed = Number(value);
@@ -72,6 +80,26 @@ function parseStoredQuantity(quantity?: string) {
 
 function getFoodKey(food: FoodDefinition) {
   return `${food.source}:${food.id}`;
+}
+
+function FieldError({ message }: { message?: string | null }) {
+  if (!message) {
+    return null;
+  }
+
+  return <Text style={styles.errorText}>{message}</Text>;
+}
+
+async function loadTestProfileId() {
+  try {
+    return (
+      (await AsyncStorage.getItem(TEST_PROFILE_ID_KEY)) ??
+      (await AsyncStorage.getItem(LEGACY_TEST_PROFILE_ID_KEY))
+    );
+  } catch (error) {
+    console.warn('Failed to load testProfileId for scanned food sync.', error);
+    return null;
+  }
 }
 
 type OpenFoodFactsProduct = {
@@ -165,6 +193,35 @@ function mapOpenFoodFactsProduct(
     keywords: Array.from(
       new Set([...toWords(name), ...toWords(category), ...toWords(product.brands ?? ''), barcode]),
     ),
+    servingPresets: [
+      {
+        label: '100g',
+        quantity: 100,
+        unit: 'g',
+        calories: Math.round(calories),
+        protein: round(protein),
+        carbs: round(carbs),
+        fat: round(fat),
+      },
+      {
+        label: '150g',
+        quantity: 150,
+        unit: 'g',
+        calories: Math.round(calories * 1.5),
+        protein: round(protein * 1.5),
+        carbs: round(carbs * 1.5),
+        fat: round(fat * 1.5),
+      },
+      {
+        label: '200g',
+        quantity: 200,
+        unit: 'g',
+        calories: Math.round(calories * 2),
+        protein: round(protein * 2),
+        carbs: round(carbs * 2),
+        fat: round(fat * 2),
+      },
+    ],
   };
 }
 
@@ -181,6 +238,7 @@ export default function AddFoodScreen() {
     togglePinnedFood,
     updateFood,
   } = useCalories();
+  const { canSpendTokens, spendTokens, tokenBalance } = useTokens();
   const params = useLocalSearchParams<{ entryId?: string }>();
   const editingEntryId = typeof params.entryId === 'string' ? params.entryId : undefined;
   const editingEntry = useMemo(
@@ -221,6 +279,9 @@ export default function AddFoodScreen() {
   const [fat, setFat] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [mealName, setMealName] = useState('');
+  const [committedMealName, setCommittedMealName] = useState('');
+  const [savedMealId, setSavedMealId] = useState<string | null>(null);
+  const [isMealNameEditing, setIsMealNameEditing] = useState(true);
   const [ingredientSearch, setIngredientSearch] = useState('');
   const [selectedIngredient, setSelectedIngredient] = useState<FoodDefinition | null>(null);
   const [ingredientQuantity, setIngredientQuantity] = useState('');
@@ -231,6 +292,27 @@ export default function AddFoodScreen() {
   const [ingredientFat, setIngredientFat] = useState('');
   const [editingIngredientIndex, setEditingIngredientIndex] = useState<number | null>(null);
   const [mealIngredients, setMealIngredients] = useState<MealIngredient[]>([]);
+  const searchInputRef = useRef<TextInput>(null);
+  const mealNameInputRef = useRef<TextInput>(null);
+  const activeModeRef = useRef(activeMode);
+  const detailsOpenRef = useRef(detailsOpen);
+
+  useEffect(() => {
+    activeModeRef.current = activeMode;
+    detailsOpenRef.current = detailsOpen;
+  }, [activeMode, detailsOpen]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const focusTimer = setTimeout(() => {
+        if (!editingEntryId && activeModeRef.current === 'find' && !detailsOpenRef.current) {
+          searchInputRef.current?.focus();
+        }
+      }, 250);
+
+      return () => clearTimeout(focusTimer);
+    }, [editingEntryId]),
+  );
 
   useEffect(() => {
     if (editingEntry) {
@@ -303,15 +385,52 @@ export default function AddFoodScreen() {
     : pinnedFoodKeys.length > 0
       ? 'Pinned foods'
       : 'Top foods';
-  const hasValidFood =
-    name.trim().length > 0 &&
-    toNumber(quantity) > 0 &&
-    unit.trim().length > 0 &&
-    toNumber(calories) > 0 &&
-    toNumber(protein) >= 0 &&
-    toNumber(carbs) >= 0 &&
-    toNumber(fat) >= 0;
+  const foodErrors = useMemo(
+    () => getFoodFormErrors({ name, quantity, unit, calories, protein, carbs, fat }),
+    [calories, carbs, fat, name, protein, quantity, unit],
+  );
+  const hasValidFood = !hasErrors(foodErrors);
   const hasValidCustomFood = hasValidFood;
+  const ingredientErrors = useMemo(
+    () =>
+      getFoodFormErrors({
+        name: selectedIngredient?.name ?? '',
+        quantity: ingredientQuantity,
+        unit: ingredientUnit,
+        calories: ingredientCalories,
+        protein: ingredientProtein,
+        carbs: ingredientCarbs,
+        fat: ingredientFat,
+      }),
+    [
+      ingredientCalories,
+      ingredientCarbs,
+      ingredientFat,
+      ingredientProtein,
+      ingredientQuantity,
+      ingredientUnit,
+      selectedIngredient?.name,
+    ],
+  );
+  const hasValidIngredient = Boolean(selectedIngredient) && !hasErrors(ingredientErrors);
+  const normalizedMealName = normalizeText(mealName);
+  const duplicateMeal = useMemo(
+    () =>
+      normalizedMealName
+        ? mealTemplates.find(
+            (template) =>
+              normalizeText(template.name) === normalizedMealName &&
+              template.id !== savedMealId &&
+              template.supabaseId !== savedMealId,
+          )
+        : undefined,
+    [mealTemplates, normalizedMealName, savedMealId],
+  );
+  const duplicateMealNameError = duplicateMeal
+    ? 'A meal with this name already exists.'
+    : null;
+  const mealNameError = validateName(mealName, 'Meal name') ?? duplicateMealNameError;
+  const hasValidMeal = !mealNameError && mealIngredients.length > 0;
   const isEditing = Boolean(editingEntry);
   const servingPresets = useMemo(() => {
     if (selectedFood?.servingPresets?.length) {
@@ -428,7 +547,10 @@ export default function AddFoodScreen() {
         return true;
       }
 
-      return food.keywords.some((keyword) => normalizeText(keyword) === normalizedValue);
+      return food.keywords.some((keyword) => {
+        const normalizedKeyword = normalizeText(keyword);
+        return normalizedKeyword === normalizedValue || normalizedKeyword.includes(normalizedValue);
+      });
     });
   }
 
@@ -466,19 +588,58 @@ export default function AddFoodScreen() {
     }
   }
 
+  async function saveScannedFoodToSupabase(scannedBarcode: string, product: FoodDefinition) {
+    const testProfileId = await loadTestProfileId();
+
+    if (!testProfileId) {
+      return;
+    }
+
+    const calories = Math.round(product.calories);
+    const baseCalories = Math.round(product.baseCalories ?? product.calories);
+    const mappedScannedFood = {
+      user_id: testProfileId,
+      barcode: product.barcode ?? scannedBarcode,
+      food_key: product.id ?? scannedBarcode,
+      name: product.name,
+      category: product.category ?? 'Scanned food',
+      base_quantity: Number(product.baseQuantity ?? 100),
+      unit: product.unit ?? 'g',
+      calories,
+      protein: Number(product.protein ?? 0),
+      carbs: Number(product.carbs ?? 0),
+      fat: Number(product.fat ?? 0),
+      base_calories: baseCalories,
+      base_protein: Number(product.protein ?? 0),
+      base_carbs: Number(product.carbs ?? 0),
+      base_fat: Number(product.fat ?? 0),
+      source: 'barcode' as const,
+      keywords: product.keywords ?? [],
+      created_at: new Date().toISOString(),
+    };
+
+    await createScannedFood(mappedScannedFood);
+  }
+
   async function handleBarcodeScanned(value: string) {
+    if (!canSpendTokens(2)) {
+      return 'no_tokens' as const;
+    }
+
     const food = findFoodByBarcode(value);
 
     if (food) {
+      await saveScannedFoodToSupabase(value, food);
+      await spendTokens(2, 'scan_food');
       setActiveMode('find');
       openFoodDetails(food);
-      return true;
+      return 'found' as const;
     }
 
     const remoteFood = await fetchOpenFoodFactsFood(value);
 
     if (!remoteFood) {
-      return false;
+      return 'not_found' as const;
     }
 
     const cachedTemplate = await addFoodTemplate({
@@ -492,13 +653,16 @@ export default function AddFoodScreen() {
       carbs: remoteFood.carbs,
       fat: remoteFood.fat,
       keywords: remoteFood.keywords,
+      servingPresets: remoteFood.servingPresets,
       source: 'barcode',
     });
     const cachedFood = templateToFoodDefinition(cachedTemplate);
 
+    await saveScannedFoodToSupabase(value, cachedFood);
+    await spendTokens(2, 'scan_food');
     setActiveMode('find');
     openFoodDetails(cachedFood);
-    return true;
+    return 'found' as const;
   }
 
   function closeDetails() {
@@ -580,7 +744,9 @@ export default function AddFoodScreen() {
   }
 
   function openIngredientDetails(food: FoodDefinition) {
+    Keyboard.dismiss();
     setSelectedIngredient(food);
+    setIngredientSearch('');
     setIngredientQuantity(String(food.baseQuantity));
     setIngredientUnit(food.unit);
     setIngredientCalories(String(food.baseCalories));
@@ -647,26 +813,54 @@ export default function AddFoodScreen() {
     setEditingIngredientIndex(null);
   }
 
+  function startMealNameEdit() {
+    setIsMealNameEditing(true);
+    setTimeout(() => {
+      mealNameInputRef.current?.focus();
+    }, 50);
+  }
+
+  function finishMealNameEdit() {
+    const trimmedName = mealName.trim();
+
+    if (!trimmedName) {
+      setMealName(committedMealName);
+      setIsMealNameEditing(!committedMealName);
+      return;
+    }
+
+    if (mealNameError) {
+      setIsMealNameEditing(true);
+      return;
+    }
+
+    setMealName(trimmedName);
+    setCommittedMealName(trimmedName);
+    setIsMealNameEditing(false);
+  }
+
   function handleAddIngredient() {
-    if (!selectedIngredient || toNumber(ingredientQuantity) <= 0 || toNumber(ingredientCalories) <= 0) {
-      Alert.alert('Check ingredient', 'Select an ingredient and enter quantity/calories.');
+    const activeIngredient = selectedIngredient;
+
+    if (!activeIngredient || !hasValidIngredient) {
+      Alert.alert('Check ingredient', 'Select an ingredient and fix the highlighted fields.');
       return;
     }
 
     const nextIngredient: MealIngredient = {
-      foodId: getFoodKey(selectedIngredient),
-      name: selectedIngredient.name,
+      foodId: getFoodKey(activeIngredient),
+      name: activeIngredient.name,
       quantity: round(toNumber(ingredientQuantity)),
       unit: ingredientUnit.trim(),
       calories: Math.round(toNumber(ingredientCalories)),
       protein: round(toNumber(ingredientProtein)),
       carbs: round(toNumber(ingredientCarbs)),
       fat: round(toNumber(ingredientFat)),
-      baseQuantity: selectedIngredient.baseQuantity,
-      baseCalories: selectedIngredient.baseCalories,
-      baseProtein: selectedIngredient.protein,
-      baseCarbs: selectedIngredient.carbs,
-      baseFat: selectedIngredient.fat,
+      baseQuantity: activeIngredient.baseQuantity,
+      baseCalories: activeIngredient.baseCalories,
+      baseProtein: activeIngredient.protein,
+      baseCarbs: activeIngredient.carbs,
+      baseFat: activeIngredient.fat,
     };
 
     setMealIngredients((current) => {
@@ -711,33 +905,61 @@ export default function AddFoodScreen() {
     setMealIngredients((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
+  function showNotEnoughTokensAlert() {
+    Alert.alert('Not enough tokens', 'Add tokens to continue', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Get tokens',
+        onPress: () => {
+          router.push('/settings');
+        },
+      },
+    ]);
+  }
+
   async function handleSaveMealTemplate() {
-    if (!mealName.trim() || mealIngredients.length === 0) {
-      Alert.alert('Check meal', 'Enter a meal name and add at least one ingredient.');
+    if (!hasValidMeal) {
+      Alert.alert('Check meal', 'Enter a valid meal name and add at least one ingredient.');
+      return null;
+    }
+
+    if (!canSpendTokens(1)) {
+      showNotEnoughTokensAlert();
       return null;
     }
 
     const nextMeal = await addMealTemplate({
-      name: mealName,
+      name: mealName.trim(),
       ingredients: mealIngredients,
       calories: Math.round(mealTotals.calories),
       protein: round(mealTotals.protein),
       carbs: round(mealTotals.carbs),
       fat: round(mealTotals.fat),
     });
+    setSavedMealId(nextMeal.supabaseId ?? nextMeal.id);
+    setCommittedMealName(nextMeal.name);
+    setMealName(nextMeal.name);
+    setIsMealNameEditing(false);
+    await spendTokens(1, 'add_meal');
     Alert.alert('Meal saved', `${mealName.trim()} will appear in food search.`);
     return nextMeal;
   }
 
   async function handleAddMealToToday() {
-    if (!mealName.trim() || mealIngredients.length === 0) {
-      Alert.alert('Check meal', 'Enter a meal name and add at least one ingredient.');
+    if (!hasValidMeal) {
+      Alert.alert('Check meal', 'Enter a valid meal name and add at least one ingredient.');
+      return;
+    }
+
+    if (!canSpendTokens(1)) {
+      showNotEnoughTokensAlert();
       return;
     }
 
     await addFood({
-      name: mealName,
+      name: mealName.trim(),
       foodKey: `meal:${mealName.trim().toLowerCase()}`,
+      source: 'meal',
       calories: Math.round(mealTotals.calories),
       quantity: '1 meal',
       quantityValue: 1,
@@ -751,12 +973,13 @@ export default function AddFoodScreen() {
       baseCarbs: round(mealTotals.carbs),
       baseFat: round(mealTotals.fat),
     });
+    await spendTokens(1, 'add_meal');
     router.push('/');
   }
 
   async function handleSaveCustomFood() {
     if (!hasValidCustomFood) {
-      Alert.alert('Check custom food', 'Enter name, quantity, unit, calories, and macros.');
+      Alert.alert('Check custom food', 'Fix the highlighted fields before saving.');
       return;
     }
 
@@ -777,7 +1000,7 @@ export default function AddFoodScreen() {
 
   async function handleSave() {
     if (!hasValidFood || isSaving) {
-      Alert.alert('Check food details', 'Enter food name, quantity, unit, calories, and macros.');
+      Alert.alert('Check food details', 'Fix the highlighted fields before saving.');
       return;
     }
 
@@ -787,6 +1010,7 @@ export default function AddFoodScreen() {
       const input = {
         name,
         foodKey: selectedFood ? getFoodKey(selectedFood) : undefined,
+        source: selectedFood?.source ?? (manualMode ? 'manual' : undefined),
         calories: Math.round(toNumber(calories)),
         quantity: `${round(toNumber(quantity))} ${unit.trim()}`,
         quantityValue: round(toNumber(quantity)),
@@ -880,6 +1104,7 @@ export default function AddFoodScreen() {
         onBack={() => setActiveMode('find')}
         onPrepareMeal={() => setActiveMode('meal')}
         onLookupBarcode={handleBarcodeScanned}
+        tokenBalance={tokenBalance}
       />
     );
   }
@@ -913,17 +1138,45 @@ export default function AddFoodScreen() {
 
           <View style={styles.card}>
             <Text style={styles.title}>Prepare meal</Text>
-            <View style={styles.field}>
-              <Text style={styles.label}>Meal name</Text>
-              <TextInput
-                autoCapitalize="words"
-                onChangeText={setMealName}
-                placeholder="Chicken rice bowl"
-                placeholderTextColor="#9A9FA6"
-                style={styles.input}
-                value={mealName}
-              />
-            </View>
+            <Text style={styles.tokenText}>Tokens: {tokenBalance}</Text>
+            {isMealNameEditing || !mealName.trim() ? (
+              <View style={styles.field}>
+                <Text style={styles.label}>Meal name</Text>
+                <View style={styles.nameEditRow}>
+                  <TextInput
+                    ref={mealNameInputRef}
+                    autoCapitalize="words"
+                    onBlur={finishMealNameEdit}
+                    onChangeText={setMealName}
+                    placeholder="Chicken rice bowl"
+                    placeholderTextColor="#9A9FA6"
+                    selectTextOnFocus
+                    style={[styles.input, styles.nameEditInput, mealNameError && styles.inputError]}
+                    value={mealName}
+                  />
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={Boolean(mealNameError)}
+                    onPress={finishMealNameEdit}
+                    style={({ pressed }) => [
+                      styles.doneButton,
+                      mealNameError && styles.buttonDisabled,
+                      pressed && !mealNameError ? styles.buttonPressed : null,
+                    ]}>
+                    <Text style={styles.doneButtonText}>Done</Text>
+                  </Pressable>
+                </View>
+                <FieldError message={mealNameError} />
+              </View>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                onPress={startMealNameEdit}
+                style={({ pressed }) => [styles.mealNameCard, pressed && styles.foodResultPressed]}>
+                <Text style={styles.mealNameTitle}>{mealName.trim()}</Text>
+                <Text style={styles.mealNameHint}>Tap to rename</Text>
+              </Pressable>
+            )}
 
             <View style={styles.totalCard}>
               <Text style={styles.totalTitle}>{Math.round(mealTotals.calories)} cal</Text>
@@ -1000,9 +1253,10 @@ export default function AddFoodScreen() {
                       onChangeText={handleIngredientQuantityChange}
                       placeholder="100"
                       placeholderTextColor="#9A9FA6"
-                      style={styles.input}
+                      style={[styles.input, ingredientErrors.quantity && styles.inputError]}
                       value={ingredientQuantity}
                     />
+                    <FieldError message={ingredientErrors.quantity} />
                   </View>
                   <View style={[styles.field, styles.unitField]}>
                     <Text style={styles.label}>Unit</Text>
@@ -1011,9 +1265,10 @@ export default function AddFoodScreen() {
                       onChangeText={setIngredientUnit}
                       placeholder="g"
                       placeholderTextColor="#9A9FA6"
-                      style={styles.input}
+                      style={[styles.input, ingredientErrors.unit && styles.inputError]}
                       value={ingredientUnit}
                     />
+                    <FieldError message={ingredientErrors.unit} />
                   </View>
                 </View>
 
@@ -1025,20 +1280,31 @@ export default function AddFoodScreen() {
                     onChangeText={handleIngredientCaloriesChange}
                     placeholder="250"
                     placeholderTextColor="#9A9FA6"
-                    style={styles.input}
+                    style={[styles.input, ingredientErrors.calories && styles.inputError]}
                     value={ingredientCalories}
                   />
+                  <FieldError message={ingredientErrors.calories} />
                 </View>
 
                 <Text style={styles.macroSummary}>
                   P {round(toNumber(ingredientProtein))}g / C {round(toNumber(ingredientCarbs))}g / F{' '}
                   {round(toNumber(ingredientFat))}g
                 </Text>
+                <FieldError
+                  message={
+                    ingredientErrors.protein ?? ingredientErrors.carbs ?? ingredientErrors.fat
+                  }
+                />
 
                 <Pressable
                   accessibilityRole="button"
+                  disabled={!hasValidIngredient}
                   onPress={handleAddIngredient}
-                  style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    !hasValidIngredient && styles.buttonDisabled,
+                    pressed && hasValidIngredient ? styles.buttonPressed : null,
+                  ]}>
                   <Text style={styles.secondaryButtonText}>
                     {editingIngredientIndex === null ? 'Add ingredient' : 'Update ingredient'}
                   </Text>
@@ -1080,17 +1346,30 @@ export default function AddFoodScreen() {
                 </View>
               ))
             )}
+            {mealIngredients.length === 0 ? (
+              <FieldError message="Add at least one ingredient before saving." />
+            ) : null}
 
             <Pressable
               accessibilityRole="button"
+              disabled={!hasValidMeal}
               onPress={handleSaveMealTemplate}
-              style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
+              style={({ pressed }) => [
+                styles.secondaryButton,
+                !hasValidMeal && styles.buttonDisabled,
+                pressed && hasValidMeal ? styles.buttonPressed : null,
+              ]}>
               <Text style={styles.secondaryButtonText}>Save meal</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
+              disabled={!hasValidMeal}
               onPress={handleAddMealToToday}
-              style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
+              style={({ pressed }) => [
+                styles.button,
+                !hasValidMeal && styles.buttonDisabled,
+                pressed && hasValidMeal ? styles.buttonPressed : null,
+              ]}>
               <Text style={styles.buttonText}>Add meal to today</Text>
             </Pressable>
           </View>
@@ -1132,9 +1411,10 @@ export default function AddFoodScreen() {
                 onChangeText={setName}
                 placeholder="Food name"
                 placeholderTextColor="#9A9FA6"
-                style={styles.input}
+                style={[styles.input, foodErrors.name && styles.inputError]}
                 value={name}
               />
+              <FieldError message={foodErrors.name} />
             </View>
 
             {servingPresets.length > 0 ? (
@@ -1177,9 +1457,10 @@ export default function AddFoodScreen() {
                   onChangeText={handleQuantityChange}
                   placeholder="100"
                   placeholderTextColor="#9A9FA6"
-                  style={styles.input}
+                  style={[styles.input, foodErrors.quantity && styles.inputError]}
                   value={quantity}
                 />
+                <FieldError message={foodErrors.quantity} />
               </View>
               <View style={[styles.field, styles.unitField]}>
                 <Text style={styles.label}>Unit</Text>
@@ -1188,9 +1469,10 @@ export default function AddFoodScreen() {
                   onChangeText={setUnit}
                   placeholder="g"
                   placeholderTextColor="#9A9FA6"
-                  style={styles.input}
+                  style={[styles.input, foodErrors.unit && styles.inputError]}
                   value={unit}
                 />
+                <FieldError message={foodErrors.unit} />
               </View>
             </View>
 
@@ -1202,9 +1484,10 @@ export default function AddFoodScreen() {
                 onChangeText={handleCaloriesChange}
                 placeholder="250"
                 placeholderTextColor="#9A9FA6"
-                style={styles.input}
+                style={[styles.input, foodErrors.calories && styles.inputError]}
                 value={calories}
               />
+              <FieldError message={foodErrors.calories} />
             </View>
 
             <View style={styles.macroGrid}>
@@ -1216,9 +1499,10 @@ export default function AddFoodScreen() {
                   onChangeText={setProtein}
                   placeholder="0"
                   placeholderTextColor="#9A9FA6"
-                  style={styles.input}
+                  style={[styles.input, foodErrors.protein && styles.inputError]}
                   value={protein}
                 />
+                <FieldError message={foodErrors.protein} />
               </View>
               <View style={styles.macroField}>
                 <Text style={styles.label}>Carbs</Text>
@@ -1228,9 +1512,10 @@ export default function AddFoodScreen() {
                   onChangeText={setCarbs}
                   placeholder="0"
                   placeholderTextColor="#9A9FA6"
-                  style={styles.input}
+                  style={[styles.input, foodErrors.carbs && styles.inputError]}
                   value={carbs}
                 />
+                <FieldError message={foodErrors.carbs} />
               </View>
               <View style={styles.macroField}>
                 <Text style={styles.label}>Fat</Text>
@@ -1240,9 +1525,10 @@ export default function AddFoodScreen() {
                   onChangeText={setFat}
                   placeholder="0"
                   placeholderTextColor="#9A9FA6"
-                  style={styles.input}
+                  style={[styles.input, foodErrors.fat && styles.inputError]}
                   value={fat}
                 />
+                <FieldError message={foodErrors.fat} />
               </View>
             </View>
 
@@ -1322,6 +1608,7 @@ export default function AddFoodScreen() {
               <View style={styles.field}>
                 <Text style={styles.label}>Search foods</Text>
                 <TextInput
+                  ref={searchInputRef}
                   autoCapitalize="words"
                   onChangeText={setSearch}
                   placeholder="Rice, tuna, yogurt"
@@ -1387,7 +1674,8 @@ type ScanProductScreenProps = {
   onAddMyFood: () => void;
   onBack: () => void;
   onPrepareMeal: () => void;
-  onLookupBarcode: (barcode: string) => Promise<boolean>;
+  onLookupBarcode: (barcode: string) => Promise<'found' | 'not_found' | 'no_tokens'>;
+  tokenBalance: number;
 };
 
 function ScanProductScreen({
@@ -1395,10 +1683,12 @@ function ScanProductScreen({
   onBack,
   onLookupBarcode,
   onPrepareMeal,
+  tokenBalance,
 }: ScanProductScreenProps) {
   const [permission, requestPermission] = useCameraPermissions();
   const [scannedValue, setScannedValue] = useState<string | null>(null);
   const [notFoundValue, setNotFoundValue] = useState<string | null>(null);
+  const [notEnoughTokens, setNotEnoughTokens] = useState(false);
   const [isLookingUp, setIsLookingUp] = useState(false);
 
   async function handleBarcodeScanned(result: BarcodeScanningResult) {
@@ -1408,10 +1698,15 @@ function ScanProductScreen({
 
     setScannedValue(result.data);
     setIsLookingUp(true);
-    const found = await onLookupBarcode(result.data);
+    const status = await onLookupBarcode(result.data);
     setIsLookingUp(false);
 
-    if (!found) {
+    if (status === 'no_tokens') {
+      setNotEnoughTokens(true);
+      return;
+    }
+
+    if (status === 'not_found') {
       setNotFoundValue(result.data);
     }
   }
@@ -1419,6 +1714,7 @@ function ScanProductScreen({
   function handleScanAgain() {
     setScannedValue(null);
     setNotFoundValue(null);
+    setNotEnoughTokens(false);
     setIsLookingUp(false);
   }
 
@@ -1444,6 +1740,7 @@ function ScanProductScreen({
 
         <View style={styles.card}>
           <Text style={styles.title}>Scan product</Text>
+          <Text style={styles.tokenText}>Tokens: {tokenBalance}</Text>
           <Text style={styles.subtitle}>Scan a barcode and match it against the local food database.</Text>
 
           {!permission ? (
@@ -1491,6 +1788,27 @@ function ScanProductScreen({
                   onPress={handleScanAgain}
                   style={({ pressed }) => [styles.manualButton, styles.flexField, pressed && styles.buttonPressed]}>
                   <Text style={styles.manualButtonText}>Scan again</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
+          {notEnoughTokens ? (
+            <View style={styles.notFoundBox}>
+              <Text style={styles.manualPromptText}>Not enough tokens</Text>
+              <Text style={styles.foodResultMeta}>Add tokens to continue.</Text>
+              <View style={styles.rowFields}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => router.push('/settings')}
+                  style={({ pressed }) => [styles.manualButton, styles.flexField, pressed && styles.buttonPressed]}>
+                  <Text style={styles.manualButtonText}>Get tokens</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleScanAgain}
+                  style={({ pressed }) => [styles.secondaryButton, styles.flexField, pressed && styles.buttonPressed]}>
+                  <Text style={styles.secondaryButtonText}>Scan again</Text>
                 </Pressable>
               </View>
             </View>
@@ -1566,6 +1884,47 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
+  tokenText: {
+    color: '#2E7D57',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  mealNameCard: {
+    gap: 4,
+    borderRadius: 8,
+    backgroundColor: '#F7F7F2',
+    padding: 14,
+  },
+  mealNameTitle: {
+    color: '#1E1F24',
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  mealNameHint: {
+    color: '#6B6F76',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  nameEditRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  nameEditInput: {
+    flex: 1,
+  },
+  doneButton: {
+    minWidth: 78,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
+    paddingHorizontal: 12,
+  },
+  doneButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '900',
+  },
   field: {
     gap: 8,
   },
@@ -1583,6 +1942,16 @@ const styles = StyleSheet.create({
     color: '#1E1F24',
     paddingHorizontal: 14,
     fontSize: 16,
+  },
+  inputError: {
+    borderColor: '#B95C3A',
+    backgroundColor: '#FFF7F4',
+  },
+  errorText: {
+    color: '#B95C3A',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 16,
   },
   categoryRow: {
     gap: 8,
