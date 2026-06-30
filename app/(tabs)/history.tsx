@@ -8,6 +8,7 @@ import { Screen } from '@/src/components/Screen';
 import { formatDateLabel, getDateKey } from '@/src/date';
 import { useCalories } from '@/src/context/CalorieContext';
 import { FoodEntry } from '@/src/types';
+import { useAppTheme } from '@/src/theme/appTheme';
 
 type GoalStatus = 'Under goal' | 'Goal reached' | 'Over goal';
 
@@ -50,6 +51,7 @@ function getGoalStatus(totalCalories: number, dailyGoal: number): GoalStatus {
 }
 
 export default function HistoryScreen() {
+  const theme = useAppTheme();
   const { dailyGoal, daySummaries, deleteFood, entries, isLoading } = useCalories();
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const activeDate = selectedDate ?? daySummaries[0]?.date ?? null;
@@ -125,7 +127,7 @@ export default function HistoryScreen() {
       <WeeklyStatsSection stats={weeklyStats} />
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Previous days</Text>
+        <Text style={[styles.sectionTitle, { color: theme.text }]}>Previous days</Text>
         {daySummaries.map((summary) => {
           const isSelected = summary.date === activeDate;
 
@@ -136,16 +138,17 @@ export default function HistoryScreen() {
               onPress={() => setSelectedDate(summary.date)}
               style={({ pressed }) => [
                 styles.dayRow,
+                { backgroundColor: theme.card, borderColor: theme.cardBorder },
                 isSelected && styles.dayRowSelected,
                 pressed && styles.dayRowPressed,
               ]}>
               <View>
-                <Text style={[styles.dayLabel, isSelected && styles.dayLabelSelected]}>
+                <Text style={[styles.dayLabel, { color: theme.text }, isSelected && styles.dayLabelSelected]}>
                   {formatDateLabel(summary.date)}
                 </Text>
-                <Text style={styles.dayMeta}>{summary.entries.length} foods</Text>
+                <Text style={[styles.dayMeta, { color: theme.mutedText }]}>{summary.entries.length} foods</Text>
               </View>
-              <Text style={[styles.dayCalories, isSelected && styles.dayCaloriesSelected]}>
+              <Text style={[styles.dayCalories, { color: theme.success }, isSelected && styles.dayCaloriesSelected]}>
                 {summary.totalCalories} cal
               </Text>
             </Pressable>
@@ -156,11 +159,17 @@ export default function HistoryScreen() {
       {selectedDay ? (
         <View style={styles.section}>
           <View style={styles.detailHeader}>
-            <Text style={styles.sectionTitle}>{formatDateLabel(selectedDay.date)}</Text>
-            <Text style={styles.total}>{selectedDay.totalCalories} cal</Text>
+            <Text style={[styles.sectionTitle, { color: theme.text }]}>{formatDateLabel(selectedDay.date)}</Text>
+            <Text style={[styles.total, { color: theme.success }]}>{selectedDay.totalCalories} cal</Text>
           </View>
           {selectedDay.entries.map((entry) => (
-            <FoodRow key={entry.id} entry={entry} onDelete={handleDelete} onEdit={handleEdit} />
+            <FoodRow
+              key={entry.id}
+              entry={entry}
+              onDelete={handleDelete}
+              onEdit={handleEdit}
+              variant={theme.isDark ? 'dark' : 'light'}
+            />
           ))}
         </View>
       ) : null}
@@ -169,45 +178,48 @@ export default function HistoryScreen() {
 }
 
 function WeeklyStatsSection({ stats }: { stats: WeeklyStats }) {
+  const theme = useAppTheme();
+
   return (
-    <View style={styles.weeklyCard}>
+    <View style={[styles.weeklyCard, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
       <View style={styles.weeklyHeader}>
-        <Text style={styles.sectionTitle}>This week</Text>
-        <Text style={styles.weeklySubtle}>{stats.trackedDaysCount} days tracked</Text>
+        <Text style={[styles.sectionTitle, { color: theme.text }]}>This week</Text>
+        <Text style={[styles.weeklySubtle, { color: theme.mutedText }]}>{stats.trackedDaysCount} days tracked</Text>
       </View>
 
       <View style={styles.statGrid}>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Total</Text>
-          <Text style={styles.statValue}>{stats.totalCalories} cal</Text>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+          <Text style={[styles.statLabel, { color: theme.mutedText }]}>Total</Text>
+          <Text style={[styles.statValue, { color: theme.text }]}>{stats.totalCalories} cal</Text>
         </View>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Average/day</Text>
-          <Text style={styles.statValue}>{stats.averageCalories} cal</Text>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+          <Text style={[styles.statLabel, { color: theme.mutedText }]}>Average/day</Text>
+          <Text style={[styles.statValue, { color: theme.text }]}>{stats.averageCalories} cal</Text>
         </View>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Highest day</Text>
-          <Text style={styles.statValue}>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+          <Text style={[styles.statLabel, { color: theme.mutedText }]}>Highest day</Text>
+          <Text style={[styles.statValue, { color: theme.text }]}>
             {stats.highestDay ? `${stats.highestDay.label}: ${stats.highestDay.totalCalories}` : 'None yet'}
           </Text>
         </View>
-        <View style={styles.statTile}>
-          <Text style={styles.statLabel}>Tracked</Text>
-          <Text style={styles.statValue}>{stats.trackedDaysCount} / 7 days</Text>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+          <Text style={[styles.statLabel, { color: theme.mutedText }]}>Tracked</Text>
+          <Text style={[styles.statValue, { color: theme.text }]}>{stats.trackedDaysCount} / 7 days</Text>
         </View>
       </View>
 
       <View style={styles.weekList}>
         {stats.days.map((day) => (
-          <View key={day.date} style={styles.weekDayRow}>
-            <Text style={styles.weekDayLabel}>{day.label}</Text>
+          <View key={day.date} style={[styles.weekDayRow, { backgroundColor: theme.cardAlt }]}>
+            <Text style={[styles.weekDayLabel, { color: theme.text }]}>{day.label}</Text>
             <View style={styles.weekDayMeta}>
-              <Text style={styles.weekDayCalories}>{day.totalCalories} cal</Text>
+              <Text style={[styles.weekDayCalories, { color: theme.text }]}>{day.totalCalories} cal</Text>
               <Text
                 style={[
                   styles.goalStatus,
-                  day.status === 'Goal reached' && styles.goalStatusReached,
-                  day.status === 'Over goal' && styles.goalStatusOver,
+                  { color: theme.success },
+                  day.status === 'Goal reached' && { color: theme.primary },
+                  day.status === 'Over goal' && { color: theme.warning },
                 ]}>
                 {day.status}
               </Text>
@@ -234,6 +246,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 16,
+    borderWidth: 1,
+    borderColor: 'transparent',
     borderRadius: 8,
     backgroundColor: '#FFFFFF',
     padding: 16,
@@ -279,6 +293,8 @@ const styles = StyleSheet.create({
   },
   weeklyCard: {
     gap: 16,
+    borderWidth: 1,
+    borderColor: 'transparent',
     borderRadius: 8,
     backgroundColor: '#FFFFFF',
     padding: 16,

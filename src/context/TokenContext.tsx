@@ -26,7 +26,7 @@ export type TokenTransaction = {
   createdAt: string;
 };
 
-type SpendReason = 'scan_food' | 'add_meal';
+type SpendReason = 'scan_food' | 'add_meal' | 'unlock_water_intake' | 'meal_photo_estimate';
 
 type TokenContextValue = {
   addTokens: (amount: number) => Promise<void>;
@@ -375,7 +375,14 @@ export function TokenProvider({ children }: PropsWithChildren) {
     }
 
     mutationVersionRef.current += 1;
-    const label = reason === 'scan_food' ? 'Scan food' : 'Add meal';
+    const label =
+      reason === 'scan_food'
+        ? 'Scan food'
+        : reason === 'add_meal'
+          ? 'Add meal'
+          : reason === 'meal_photo_estimate'
+            ? 'Meal photo estimate'
+            : 'Unlock water intake';
     const transaction = createTransaction('spend', -amount, label);
     const nextBalance = tokenBalance - amount;
     const nextTransactions = [transaction, ...transactions];

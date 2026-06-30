@@ -11,6 +11,9 @@ export type Food = {
   protein: number;
   carbs: number;
   fat: number;
+  sugar?: number;
+  salt?: number;
+  saturatedFat?: number;
   keywords: string[];
   servingPresets?: ServingPreset[];
   source?: 'local' | 'custom' | 'meal' | 'barcode';

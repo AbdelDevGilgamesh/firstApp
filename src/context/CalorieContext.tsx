@@ -17,20 +17,35 @@ import {
 import { create as createMeal } from '@/src/services/mealsDbService';
 import {
   DEFAULT_DAILY_GOAL,
+  DEFAULT_TODAY_DASHBOARD_STYLE,
+  DEFAULT_WATER_GOAL_GLASSES,
   loadDailyGoal,
   loadFoodUsageCounts,
   loadFoodEntries,
   loadFoodTemplates,
   loadMealTemplates,
   loadPinnedFoodKeys,
+  loadTodayDashboardStyle,
+  loadWaterGoalGlasses,
+  loadWaterIntakeUnlocked,
   saveDailyGoal,
   saveFoodEntries,
   saveFoodTemplates,
   saveFoodUsageCounts,
   saveMealTemplates,
   savePinnedFoodKeys,
+  saveTodayDashboardStyle,
+  saveWaterGoalGlasses,
+  saveWaterIntakeUnlocked,
 } from '@/src/storage';
-import { DaySummary, FoodEntry, FoodTemplate, MealIngredient, MealTemplate } from '@/src/types';
+import {
+  DaySummary,
+  FoodEntry,
+  FoodTemplate,
+  MealIngredient,
+  MealTemplate,
+  TodayDashboardStyle,
+} from '@/src/types';
 
 type FoodEntryRow = Database['public']['Tables']['food_entries']['Row'];
 type CustomFoodRow = Database['public']['Tables']['custom_foods']['Row'];
@@ -67,6 +82,9 @@ type AddTemplateInput = {
   protein: number;
   carbs: number;
   fat: number;
+  sugar?: number;
+  salt?: number;
+  saturatedFat?: number;
   keywords?: string[];
   servingPresets?: FoodTemplate['servingPresets'];
   source?: 'custom' | 'barcode';
@@ -88,6 +106,9 @@ type CalorieContextValue = {
   foodUsageCounts: Record<string, number>;
   pinnedFoodKeys: string[];
   dailyGoal: number;
+  todayDashboardStyle: TodayDashboardStyle;
+  waterGoalGlasses: number;
+  waterIntakeUnlocked: boolean;
   isLoading: boolean;
   addFood: (input: AddFoodInput) => Promise<void>;
   updateFood: (id: string, input: UpdateFoodInput) => Promise<void>;
@@ -97,6 +118,9 @@ type CalorieContextValue = {
   addMealTemplate: (input: AddMealTemplateInput) => Promise<MealTemplate>;
   togglePinnedFood: (foodKey: string) => Promise<void>;
   updateDailyGoal: (goal: number) => Promise<void>;
+  updateTodayDashboardStyle: (style: TodayDashboardStyle) => Promise<void>;
+  updateWaterGoalGlasses: (goal: number) => Promise<void>;
+  updateWaterIntakeUnlocked: (isUnlocked: boolean) => Promise<void>;
   getEntriesForDate: (date: string) => FoodEntry[];
   getTotalForDate: (date: string) => number;
   daySummaries: DaySummary[];
@@ -338,6 +362,11 @@ export function CalorieProvider({ children }: PropsWithChildren) {
   const [foodUsageCounts, setFoodUsageCounts] = useState<Record<string, number>>({});
   const [pinnedFoodKeys, setPinnedFoodKeys] = useState<string[]>([]);
   const [dailyGoal, setDailyGoal] = useState(DEFAULT_DAILY_GOAL);
+  const [todayDashboardStyle, setTodayDashboardStyle] = useState<TodayDashboardStyle>(
+    DEFAULT_TODAY_DASHBOARD_STYLE,
+  );
+  const [waterIntakeUnlocked, setWaterIntakeUnlocked] = useState(false);
+  const [waterGoalGlasses, setWaterGoalGlasses] = useState(DEFAULT_WATER_GOAL_GLASSES);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -352,6 +381,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           storedMealTemplates,
           storedPinnedKeys,
           storedUsageCounts,
+          storedDashboardStyle,
+          storedWaterUnlocked,
+          storedWaterGoal,
         ] =
           await Promise.all([
           loadFoodEntries(),
@@ -360,6 +392,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           loadMealTemplates(),
           loadPinnedFoodKeys(),
           loadFoodUsageCounts(),
+          loadTodayDashboardStyle(),
+          loadWaterIntakeUnlocked(),
+          loadWaterGoalGlasses(),
         ]);
 
         if (isMounted) {
@@ -369,6 +404,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           setMealTemplates(storedMealTemplates);
           setPinnedFoodKeys(storedPinnedKeys);
           setFoodUsageCounts(storedUsageCounts);
+          setTodayDashboardStyle(storedDashboardStyle);
+          setWaterIntakeUnlocked(storedWaterUnlocked);
+          setWaterGoalGlasses(storedWaterGoal);
           setIsLoading(false);
         }
 
@@ -491,6 +529,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       protein: input.protein,
       carbs: input.carbs,
       fat: input.fat,
+      sugar: input.sugar,
+      salt: input.salt,
+      saturatedFat: input.saturatedFat,
       keywords: input.keywords,
       servingPresets: input.servingPresets,
       source: input.source ?? 'custom',
@@ -757,6 +798,23 @@ export function CalorieProvider({ children }: PropsWithChildren) {
     await saveDailyGoal(goal);
   }
 
+  async function updateTodayDashboardStyle(style: TodayDashboardStyle) {
+    setTodayDashboardStyle(style);
+    await saveTodayDashboardStyle(style);
+  }
+
+  async function updateWaterIntakeUnlocked(isUnlocked: boolean) {
+    setWaterIntakeUnlocked(isUnlocked);
+    await saveWaterIntakeUnlocked(isUnlocked);
+  }
+
+  async function updateWaterGoalGlasses(goal: number) {
+    const nextGoal = Math.max(1, Math.min(20, Math.round(goal)));
+
+    setWaterGoalGlasses(nextGoal);
+    await saveWaterGoalGlasses(nextGoal);
+  }
+
   function getEntriesForDate(date: string) {
     return entries.filter((entry) => entry.date === date);
   }
@@ -792,6 +850,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       foodUsageCounts,
       pinnedFoodKeys,
       dailyGoal,
+      todayDashboardStyle,
+      waterGoalGlasses,
+      waterIntakeUnlocked,
       isLoading,
       addFood,
       updateFood,
@@ -801,6 +862,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       addMealTemplate,
       togglePinnedFood,
       updateDailyGoal,
+      updateTodayDashboardStyle,
+      updateWaterGoalGlasses,
+      updateWaterIntakeUnlocked,
       getEntriesForDate,
       getTotalForDate,
       daySummaries,
@@ -814,6 +878,9 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       isLoading,
       mealTemplates,
       pinnedFoodKeys,
+      todayDashboardStyle,
+      waterGoalGlasses,
+      waterIntakeUnlocked,
     ],
   );
 

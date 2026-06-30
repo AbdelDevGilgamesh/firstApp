@@ -46,6 +46,9 @@ export type FoodTemplate = {
   protein: number;
   carbs: number;
   fat: number;
+  sugar?: number;
+  salt?: number;
+  saturatedFat?: number;
   keywords?: string[];
   servingPresets?: ServingPreset[];
   source?: 'custom' | 'barcode';
@@ -92,4 +95,17 @@ export type DaySummary = {
   date: string;
   totalCalories: number;
   entries: FoodEntry[];
+};
+
+export type TodayDashboardStyle = 'classic' | 'premiumDark';
+
+export type WaterLogEntry = {
+  id: string;
+  amountMl: number;
+  createdAt: string;
+};
+
+export type WaterLog = {
+  date: string;
+  entries: WaterLogEntry[];
 };

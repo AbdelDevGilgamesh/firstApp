@@ -1,11 +1,13 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -18,6 +20,9 @@ import {
 } from 'react-native';
 
 import { Screen } from '@/src/components/Screen';
+import { AddQuickActionCard } from '@/src/components/AddQuickActionCard';
+import { MealPhotoEstimateCard } from '@/src/components/MealPhotoEstimateCard';
+import { ProductRatingCard } from '@/src/components/ProductRatingCard';
 import { useCalories } from '@/src/context/CalorieContext';
 import { useTokens } from '@/src/context/TokenContext';
 import {
@@ -28,7 +33,18 @@ import {
 } from '@/src/foods';
 import { MealIngredient, ServingPreset } from '@/src/types';
 import { create as createScannedFood } from '@/src/services/scannedFoodsDbService';
+import { extractNutritionTextFromImage } from '@/src/services/nutritionOcrService';
+import { useAppTheme } from '@/src/theme/appTheme';
 import { normalizeText, searchFoods } from '@/src/utils/foodSearch';
+import {
+  MealPhotoCookingFat,
+  MealPhotoFoodType,
+  MealPhotoPortionSize,
+  MealPhotoSauce,
+  estimateMealFromPhoto,
+} from '@/src/utils/mealPhotoEstimate';
+import { ParsedNutritionFacts, parseNutritionFactsText } from '@/src/utils/nutritionFactsParser';
+import { cropCameraImageToFrame } from '@/src/utils/cropCameraImageToFrame';
 import { getFoodFormErrors, hasErrors, validateName } from '@/src/utils/validation';
 
 const MAX_SEARCH_RESULTS = 30;
@@ -53,6 +69,13 @@ const PRIORITY_CATEGORIES = [
 ];
 const TEST_PROFILE_ID_KEY = 'testProfileId';
 const LEGACY_TEST_PROFILE_ID_KEY = 'calorie-tracker.test-profile-id';
+const MEAL_PHOTO_TOKEN_COST = 5;
+
+type AddMode = 'find' | 'meal' | 'scan' | 'mealPhoto';
+type NutritionFactsStep = 'idle' | 'loading' | 'manualPaste' | 'review' | 'error';
+type ScanMode = 'barcode' | 'nutritionLabel';
+type LayoutRect = { x: number; y: number; width: number; height: number };
+type NutritionServingBasis = '100g' | '100ml' | 'serving';
 
 function toNumber(value: string) {
   const parsed = Number(value);
@@ -62,6 +85,20 @@ function toNumber(value: string) {
 function round(value: number, digits = 1) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+function parseReviewNumber(value: string) {
+  if (!value.trim()) {
+    return null;
+  }
+
+  const parsed = Number(value.replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isReviewNumberInRange(value: string, min: number, max: number) {
+  const parsed = parseReviewNumber(value);
+  return parsed !== null && parsed >= min && parsed <= max;
 }
 
 function parseStoredQuantity(quantity?: string) {
@@ -80,6 +117,51 @@ function parseStoredQuantity(quantity?: string) {
 
 function getFoodKey(food: FoodDefinition) {
   return `${food.source}:${food.id}`;
+}
+
+function getFoodAvatar(food: FoodDefinition) {
+  const normalizedCategory = normalizeText(food.category);
+  const normalizedName = normalizeText(food.name);
+
+  if (
+    normalizedCategory.includes('meat') ||
+    normalizedCategory.includes('seafood') ||
+    normalizedName.includes('chicken') ||
+    normalizedName.includes('beef') ||
+    normalizedName.includes('tuna') ||
+    normalizedName.includes('salmon')
+  ) {
+    return '🍗';
+  }
+
+  if (
+    normalizedCategory.includes('grain') ||
+    normalizedName.includes('rice') ||
+    normalizedName.includes('pasta') ||
+    normalizedName.includes('oat')
+  ) {
+    return '🍚';
+  }
+
+  if (
+    normalizedCategory.includes('vegetable') ||
+    normalizedName.includes('salad') ||
+    normalizedName.includes('lettuce')
+  ) {
+    return '🥗';
+  }
+
+  if (
+    normalizedCategory.includes('dairy') ||
+    normalizedCategory.includes('drink') ||
+    normalizedName.includes('milk') ||
+    normalizedName.includes('yogurt') ||
+    normalizedName.includes('juice')
+  ) {
+    return '🥛';
+  }
+
+  return '🍽️';
 }
 
 function FieldError({ message }: { message?: string | null }) {
@@ -117,6 +199,27 @@ type OpenFoodFactsProductResponse = {
   product?: OpenFoodFactsProduct;
 };
 
+type ProductValidationResult = {
+  isValid: boolean;
+  missingFields: string[];
+  reason: string;
+};
+
+type IncompleteScannedProduct = {
+  barcode: string;
+  name: string;
+  brand?: string;
+  validation: ProductValidationResult;
+};
+
+type OpenFoodFactsLookupResult =
+  | { type: 'found'; food: Omit<FoodDefinition, 'source'> }
+  | { type: 'incomplete'; product: IncompleteScannedProduct }
+  | { type: 'not_found' }
+  | { type: 'network_error'; message: string };
+
+type BarcodeLookupStatus = 'found' | 'incomplete' | 'not_found' | 'network_error';
+
 function toWords(value: string) {
   return value
     .toLowerCase()
@@ -149,6 +252,50 @@ function getOpenFoodFactsCategory(product: OpenFoodFactsProduct) {
   return product.categories?.split(',').map(cleanCategory).find(Boolean) ?? 'Packaged foods';
 }
 
+function validateOpenFoodFactsNutrition(product: OpenFoodFactsProduct): ProductValidationResult {
+  const nutriments = product.nutriments ?? {};
+  const calories = toOptionalNumber(nutriments['energy-kcal_100g']);
+  const protein = toOptionalNumber(nutriments['proteins_100g']);
+  const carbs = toOptionalNumber(nutriments['carbohydrates_100g']);
+  const fat = toOptionalNumber(nutriments['fat_100g']);
+  const missingFields: string[] = [];
+
+  if (calories === null) missingFields.push('calories');
+  if (protein === null) missingFields.push('protein');
+  if (carbs === null) missingFields.push('carbs');
+  if (fat === null) missingFields.push('fat');
+
+  if (calories !== null && calories <= 0) {
+    return {
+      isValid: false,
+      missingFields,
+      reason: 'Calories must be greater than 0.',
+    };
+  }
+
+  if (calories !== null && calories > 900) {
+    return {
+      isValid: false,
+      missingFields,
+      reason: 'Calories are outside the expected range per 100g.',
+    };
+  }
+
+  if (missingFields.length > 0) {
+    return {
+      isValid: false,
+      missingFields,
+      reason: `Missing nutrition fields: ${missingFields.join(', ')}.`,
+    };
+  }
+
+  return {
+    isValid: true,
+    missingFields: [],
+    reason: 'Complete calories and macro data found.',
+  };
+}
+
 function mapOpenFoodFactsProduct(
   barcode: string,
   product: OpenFoodFactsProduct,
@@ -164,15 +311,11 @@ function mapOpenFoodFactsProduct(
   const protein = toOptionalNumber(nutriments['proteins_100g']);
   const carbs = toOptionalNumber(nutriments['carbohydrates_100g']);
   const fat = toOptionalNumber(nutriments['fat_100g']);
+  const sugar = toOptionalNumber(nutriments['sugars_100g']);
+  const salt = toOptionalNumber(nutriments['salt_100g']);
+  const saturatedFat = toOptionalNumber(nutriments['saturated-fat_100g']);
 
-  if (
-    calories === null ||
-    protein === null ||
-    carbs === null ||
-    fat === null ||
-    calories <= 0 ||
-    calories > 900
-  ) {
+  if (!validateOpenFoodFactsNutrition(product).isValid || calories === null || protein === null || carbs === null || fat === null) {
     return null;
   }
 
@@ -190,6 +333,9 @@ function mapOpenFoodFactsProduct(
     protein: round(protein),
     carbs: round(carbs),
     fat: round(fat),
+    sugar: sugar === null ? undefined : round(sugar),
+    salt: salt === null ? undefined : round(salt),
+    saturatedFat: saturatedFat === null ? undefined : round(saturatedFat),
     keywords: Array.from(
       new Set([...toWords(name), ...toWords(category), ...toWords(product.brands ?? ''), barcode]),
     ),
@@ -226,6 +372,7 @@ function mapOpenFoodFactsProduct(
 }
 
 export default function AddFoodScreen() {
+  const theme = useAppTheme();
   const {
     addFood,
     addFoodTemplate,
@@ -239,8 +386,32 @@ export default function AddFoodScreen() {
     updateFood,
   } = useCalories();
   const { canSpendTokens, spendTokens, tokenBalance } = useTokens();
-  const params = useLocalSearchParams<{ entryId?: string }>();
+  const surfaceStyle = {
+    backgroundColor: theme.card,
+    borderColor: theme.cardBorder,
+    borderWidth: 1,
+    shadowColor: theme.shadow,
+  };
+  const softSurfaceStyle = {
+    backgroundColor: theme.cardAlt,
+    borderColor: theme.cardBorder,
+  };
+  const inputStyle = {
+    backgroundColor: theme.inputBackground,
+    borderColor: theme.cardBorder,
+    color: theme.text,
+  };
+  const chipStyle = {
+    backgroundColor: theme.chipBackground,
+  };
+  const textStyle = { color: theme.text };
+  const mutedTextStyle = { color: theme.mutedText };
+  const params = useLocalSearchParams<{ entryId?: string; mode?: string }>();
   const editingEntryId = typeof params.entryId === 'string' ? params.entryId : undefined;
+  const requestedMode =
+    params.mode === 'meal' || params.mode === 'scan' || params.mode === 'find' || params.mode === 'mealPhoto'
+      ? params.mode
+      : undefined;
   const editingEntry = useMemo(
     () => entries.find((entry) => entry.id === editingEntryId),
     [editingEntryId, entries],
@@ -265,7 +436,7 @@ export default function AddFoodScreen() {
   }, [allFoods]);
 
   const [search, setSearch] = useState('');
-  const [activeMode, setActiveMode] = useState<'find' | 'meal' | 'scan'>('find');
+  const [activeMode, setActiveMode] = useState<AddMode>('find');
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [manualMode, setManualMode] = useState(false);
@@ -292,6 +463,34 @@ export default function AddFoodScreen() {
   const [ingredientFat, setIngredientFat] = useState('');
   const [editingIngredientIndex, setEditingIngredientIndex] = useState<number | null>(null);
   const [mealIngredients, setMealIngredients] = useState<MealIngredient[]>([]);
+  const [pendingScannedFood, setPendingScannedFood] = useState<FoodDefinition | null>(null);
+  const [incompleteScannedProduct, setIncompleteScannedProduct] = useState<IncompleteScannedProduct | null>(null);
+  const [networkErrorBarcode, setNetworkErrorBarcode] = useState<string | null>(null);
+  const [manualBarcode, setManualBarcode] = useState<string | null>(null);
+  const [mealPhotoUri, setMealPhotoUri] = useState<string | null>(null);
+  const [mealPhotoPortion, setMealPhotoPortion] = useState<MealPhotoPortionSize>('medium');
+  const [mealPhotoCookingFat, setMealPhotoCookingFat] = useState<MealPhotoCookingFat>('none');
+  const [mealPhotoSauce, setMealPhotoSauce] = useState<MealPhotoSauce>('none');
+  const [mealPhotoFoodType, setMealPhotoFoodType] = useState<MealPhotoFoodType>('mixed');
+  const [mealPhotoEstimateVisible, setMealPhotoEstimateVisible] = useState(false);
+  const [nutritionFactsBarcode, setNutritionFactsBarcode] = useState<string | null>(null);
+  const [nutritionFactsImageUri, setNutritionFactsImageUri] = useState<string | null>(null);
+  const [nutritionFactsText, setNutritionFactsText] = useState('');
+  const [nutritionFactsOcrMessage, setNutritionFactsOcrMessage] = useState<string | null>(null);
+  const [nutritionFactsStep, setNutritionFactsStep] = useState<NutritionFactsStep>('idle');
+  const [nutritionFactsError, setNutritionFactsError] = useState<string | null>(null);
+  const [isExtractingNutritionText, setIsExtractingNutritionText] = useState(false);
+  const [isSavingNutritionProduct, setIsSavingNutritionProduct] = useState(false);
+  const [parsedNutritionFacts, setParsedNutritionFacts] = useState<ParsedNutritionFacts | null>(null);
+  const [nutritionProductName, setNutritionProductName] = useState('Scanned product');
+  const [nutritionCalories, setNutritionCalories] = useState('');
+  const [nutritionProtein, setNutritionProtein] = useState('');
+  const [nutritionCarbs, setNutritionCarbs] = useState('');
+  const [nutritionFat, setNutritionFat] = useState('');
+  const [nutritionSugar, setNutritionSugar] = useState('');
+  const [nutritionSalt, setNutritionSalt] = useState('');
+  const [nutritionSaturatedFat, setNutritionSaturatedFat] = useState('');
+  const [nutritionServingBasis, setNutritionServingBasis] = useState<NutritionServingBasis>('100g');
   const searchInputRef = useRef<TextInput>(null);
   const mealNameInputRef = useRef<TextInput>(null);
   const activeModeRef = useRef(activeMode);
@@ -304,6 +503,11 @@ export default function AddFoodScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      if (!editingEntryId) {
+        resetTransientAddState();
+        setActiveMode(requestedMode ?? 'find');
+      }
+
       const focusTimer = setTimeout(() => {
         if (!editingEntryId && activeModeRef.current === 'find' && !detailsOpenRef.current) {
           searchInputRef.current?.focus();
@@ -311,7 +515,7 @@ export default function AddFoodScreen() {
       }, 250);
 
       return () => clearTimeout(focusTimer);
-    }, [editingEntryId]),
+    }, [editingEntryId, requestedMode]),
   );
 
   useEffect(() => {
@@ -349,6 +553,12 @@ export default function AddFoodScreen() {
       resetForm();
     }
   }, [editingEntry, editingEntryId]);
+
+  useEffect(() => {
+    if (!editingEntryId && requestedMode) {
+      setActiveMode(requestedMode);
+    }
+  }, [editingEntryId, requestedMode]);
 
   const visibleFoods = useMemo(() => {
     const query = search.trim();
@@ -500,6 +710,7 @@ export default function AddFoodScreen() {
     setDetailsOpen(false);
     setManualMode(false);
     setSelectedFood(null);
+    setManualBarcode(null);
     setName('');
     setQuantity('');
     setUnit('');
@@ -507,6 +718,14 @@ export default function AddFoodScreen() {
     setProtein('');
     setCarbs('');
     setFat('');
+  }
+
+  function resetTransientAddState() {
+    resetForm();
+    setPendingScannedFood(null);
+    setIncompleteScannedProduct(null);
+    setNetworkErrorBarcode(null);
+    resetMealPhotoFlow();
   }
 
   function openFoodDetails(food: FoodDefinition) {
@@ -522,12 +741,13 @@ export default function AddFoodScreen() {
     setFat(String(food.fat));
   }
 
-  function openManualDetails() {
+  function openManualDetails(prefill?: { barcode?: string; name?: string }) {
     setSelectedFood(null);
     setDetailsOpen(true);
     setManualMode(true);
-    setName(search.trim());
-    setQuantity('');
+    setManualBarcode(prefill?.barcode ?? null);
+    setName(prefill?.name ?? search.trim());
+    setQuantity(prefill?.barcode ? '100' : '');
     setUnit('g');
     setCalories('');
     setProtein('');
@@ -554,7 +774,7 @@ export default function AddFoodScreen() {
     });
   }
 
-  async function fetchOpenFoodFactsFood(barcode: string) {
+  async function fetchOpenFoodFactsFood(barcode: string): Promise<OpenFoodFactsLookupResult> {
     try {
       const params = new URLSearchParams({
         fields: OPEN_FOOD_FACTS_FIELDS,
@@ -571,20 +791,63 @@ export default function AddFoodScreen() {
       );
 
       if (!response.ok) {
-        console.warn(`Open Food Facts lookup failed with status ${response.status}.`);
-        return null;
+        console.warn('Open Food Facts lookup failed.', { barcode, status: response.status });
+        return { type: 'network_error', message: `Open Food Facts returned ${response.status}.` };
       }
 
       const data = (await response.json()) as OpenFoodFactsProductResponse;
+      console.log('Open Food Facts status', { barcode, status: data.status });
 
       if (data.status !== 1 || !data.product) {
-        return null;
+        return { type: 'not_found' };
       }
 
-      return mapOpenFoodFactsProduct(barcode, data.product);
+      const name = (data.product.product_name || data.product.generic_name || '').trim();
+
+      if (!name) {
+        console.warn('Open Food Facts validation failed.', {
+          barcode,
+          reason: 'Product has no usable name.',
+        });
+        return {
+          type: 'incomplete',
+          product: {
+            barcode,
+            name: 'Scanned product',
+            brand: data.product.brands?.trim() || undefined,
+            validation: {
+              isValid: false,
+              missingFields: ['name'],
+              reason: 'Product exists, but the name or nutrition data is incomplete.',
+            },
+          },
+        };
+      }
+
+      const validation = validateOpenFoodFactsNutrition(data.product);
+      const mappedFood = mapOpenFoodFactsProduct(barcode, data.product);
+
+      if (!validation.isValid || !mappedFood) {
+        console.warn('Open Food Facts validation failed.', {
+          barcode,
+          missingFields: validation.missingFields,
+          reason: validation.reason,
+        });
+        return {
+          type: 'incomplete',
+          product: {
+            barcode,
+            name,
+            brand: data.product.brands?.trim() || undefined,
+            validation,
+          },
+        };
+      }
+
+      return { type: 'found', food: mappedFood };
     } catch (error) {
-      console.warn('Open Food Facts lookup failed.', error);
-      return null;
+      console.warn('Open Food Facts lookup failed.', { barcode, error });
+      return { type: 'network_error', message: 'Network request failed.' };
     }
   }
 
@@ -621,48 +884,424 @@ export default function AddFoodScreen() {
     await createScannedFood(mappedScannedFood);
   }
 
-  async function handleBarcodeScanned(value: string) {
-    if (!canSpendTokens(2)) {
-      return 'no_tokens' as const;
-    }
-
+  async function handleBarcodeScanned(value: string): Promise<BarcodeLookupStatus> {
+    console.log('Barcode scanned', { barcode: value });
+    setPendingScannedFood(null);
+    setIncompleteScannedProduct(null);
+    setNetworkErrorBarcode(null);
     const food = findFoodByBarcode(value);
 
     if (food) {
+      console.log('Barcode lookup source used', {
+        barcode: value,
+        source: food.source === 'barcode' ? 'scanned cache' : 'local',
+      });
       await saveScannedFoodToSupabase(value, food);
-      await spendTokens(2, 'scan_food');
-      setActiveMode('find');
-      openFoodDetails(food);
+      setPendingScannedFood(food);
       return 'found' as const;
     }
 
-    const remoteFood = await fetchOpenFoodFactsFood(value);
+    const lookup = await fetchOpenFoodFactsFood(value);
 
-    if (!remoteFood) {
+    if (lookup.type === 'network_error') {
+      setNetworkErrorBarcode(value);
+      return 'network_error' as const;
+    }
+
+    if (lookup.type === 'not_found') {
       return 'not_found' as const;
     }
 
+    if (lookup.type === 'incomplete') {
+      console.log('Barcode lookup source used', { barcode: value, source: 'Open Food Facts incomplete' });
+      setIncompleteScannedProduct(lookup.product);
+      return 'incomplete' as const;
+    }
+
+    console.log('Barcode lookup source used', { barcode: value, source: 'Open Food Facts' });
     const cachedTemplate = await addFoodTemplate({
       barcode: value,
-      name: remoteFood.name,
-      category: remoteFood.category,
-      baseQuantity: remoteFood.baseQuantity,
-      unit: remoteFood.unit,
-      baseCalories: remoteFood.baseCalories,
-      protein: remoteFood.protein,
-      carbs: remoteFood.carbs,
-      fat: remoteFood.fat,
-      keywords: remoteFood.keywords,
-      servingPresets: remoteFood.servingPresets,
+      name: lookup.food.name,
+      category: lookup.food.category,
+      baseQuantity: lookup.food.baseQuantity,
+      unit: lookup.food.unit,
+      baseCalories: lookup.food.baseCalories,
+      protein: lookup.food.protein,
+      carbs: lookup.food.carbs,
+      fat: lookup.food.fat,
+      sugar: lookup.food.sugar,
+      salt: lookup.food.salt,
+      saturatedFat: lookup.food.saturatedFat,
+      keywords: lookup.food.keywords,
+      servingPresets: lookup.food.servingPresets,
       source: 'barcode',
     });
     const cachedFood = templateToFoodDefinition(cachedTemplate);
 
     await saveScannedFoodToSupabase(value, cachedFood);
-    await spendTokens(2, 'scan_food');
-    setActiveMode('find');
-    openFoodDetails(cachedFood);
+    setPendingScannedFood(cachedFood);
     return 'found' as const;
+  }
+
+  async function handleAddReviewedProduct() {
+    if (!pendingScannedFood) {
+      return;
+    }
+
+    if (!canSpendTokens(2)) {
+      showNotEnoughTokensAlert();
+      return;
+    }
+
+    const product = pendingScannedFood;
+    await spendTokens(2, 'scan_food');
+    setPendingScannedFood(null);
+    setActiveMode('find');
+    openFoodDetails(product);
+  }
+
+  function handleDismissReviewedProduct() {
+    setPendingScannedFood(null);
+    setIncompleteScannedProduct(null);
+    setNetworkErrorBarcode(null);
+  }
+
+  function handleCompleteScannedProduct(product: IncompleteScannedProduct) {
+    setPendingScannedFood(null);
+    setIncompleteScannedProduct(null);
+    setNetworkErrorBarcode(null);
+    setActiveMode('find');
+    openManualDetails({ barcode: product.barcode, name: product.name });
+  }
+
+  function handleAddScannedProductManually(barcode: string) {
+    setPendingScannedFood(null);
+    setIncompleteScannedProduct(null);
+    setNetworkErrorBarcode(null);
+    setActiveMode('find');
+    openManualDetails({ barcode });
+  }
+
+  async function selectMealPhoto(source: 'camera' | 'library') {
+    const permission =
+      source === 'camera'
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert(
+        source === 'camera' ? 'Camera permission needed' : 'Photo library permission needed',
+        'Allow access to choose a meal photo.',
+      );
+      return;
+    }
+
+    const result =
+      source === 'camera'
+        ? await ImagePicker.launchCameraAsync({
+            allowsEditing: true,
+            aspect: [4, 3],
+            quality: 0.8,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            allowsEditing: true,
+            aspect: [4, 3],
+            mediaTypes: ['images'],
+            quality: 0.8,
+          });
+
+    if (result.canceled || !result.assets[0]?.uri) {
+      return;
+    }
+
+    setMealPhotoUri(result.assets[0].uri);
+    setMealPhotoEstimateVisible(false);
+  }
+
+  function resetMealPhotoFlow() {
+    setMealPhotoUri(null);
+    setMealPhotoPortion('medium');
+    setMealPhotoCookingFat('none');
+    setMealPhotoSauce('none');
+    setMealPhotoFoodType('mixed');
+    setMealPhotoEstimateVisible(false);
+  }
+
+  function resetNutritionFactsFlow() {
+    setNutritionFactsBarcode(null);
+    setNutritionFactsImageUri(null);
+    setNutritionFactsText('');
+    setNutritionFactsOcrMessage(null);
+    setNutritionFactsStep('idle');
+    setNutritionFactsError(null);
+    setIsExtractingNutritionText(false);
+    setIsSavingNutritionProduct(false);
+    setParsedNutritionFacts(null);
+    setNutritionProductName('Scanned product');
+    setNutritionCalories('');
+    setNutritionProtein('');
+    setNutritionCarbs('');
+    setNutritionFat('');
+    setNutritionSugar('');
+    setNutritionSalt('');
+    setNutritionSaturatedFat('');
+    setNutritionServingBasis('100g');
+  }
+
+  function applyParsedNutritionFacts(parsed: ParsedNutritionFacts) {
+    setParsedNutritionFacts(parsed);
+    setNutritionCalories(parsed.calories === undefined ? '' : String(parsed.calories));
+    setNutritionProtein(parsed.protein === undefined ? '' : String(parsed.protein));
+    setNutritionCarbs(parsed.carbs === undefined ? '' : String(parsed.carbs));
+    setNutritionFat(parsed.fat === undefined ? '' : String(parsed.fat));
+    setNutritionSugar(parsed.sugar === undefined ? '' : String(parsed.sugar));
+    setNutritionSalt(parsed.salt === undefined ? '' : String(parsed.salt));
+    setNutritionSaturatedFat(parsed.saturatedFat === undefined ? '' : String(parsed.saturatedFat));
+    setNutritionServingBasis(parsed.unit === 'ml' ? '100ml' : '100g');
+  }
+
+  function beginNutritionFactsScan(barcode: string) {
+    setNutritionFactsBarcode(barcode);
+    setNutritionFactsImageUri(null);
+    setNutritionFactsText('');
+    setNutritionFactsOcrMessage(null);
+    setNutritionFactsError(null);
+    setParsedNutritionFacts(null);
+    setNutritionProductName('Scanned product');
+    setNutritionCalories('');
+    setNutritionProtein('');
+    setNutritionCarbs('');
+    setNutritionFat('');
+    setNutritionSugar('');
+    setNutritionSalt('');
+    setNutritionSaturatedFat('');
+    setNutritionServingBasis('100g');
+    setNutritionFactsStep('idle');
+    setIsExtractingNutritionText(false);
+  }
+
+  function handleFillNutritionFactsManually() {
+    Keyboard.dismiss();
+    setNutritionFactsOcrMessage(null);
+    setNutritionFactsError(null);
+    setParsedNutritionFacts(null);
+    setNutritionCalories('');
+    setNutritionProtein('');
+    setNutritionCarbs('');
+    setNutritionFat('');
+    setNutritionSugar('');
+    setNutritionSalt('');
+    setNutritionSaturatedFat('');
+    setNutritionServingBasis('100g');
+    setNutritionFactsStep('review');
+  }
+
+  async function handleNutritionLabelImageSelected(imageUri: string) {
+    setNutritionFactsImageUri(imageUri);
+    setNutritionProductName('Scanned product');
+    setNutritionFactsText('');
+    setNutritionFactsOcrMessage(null);
+    setNutritionFactsError(null);
+    setParsedNutritionFacts(null);
+    setNutritionFactsStep('loading');
+    setIsExtractingNutritionText(true);
+    console.log('[Nutrition OCR] imageUri', imageUri);
+
+    try {
+      const ocrResult = await extractNutritionTextFromImage(imageUri);
+      const text = ocrResult.text.trim();
+      console.log('[Nutrition OCR] extracted text length', text.length);
+
+      if (!text) {
+        throw new Error('No text was detected in the selected image.');
+      }
+
+      const parsed = parseNutritionFactsText(text);
+      console.log('[Nutrition OCR] parsed', parsed);
+      setNutritionFactsText(text);
+      applyParsedNutritionFacts(parsed);
+      setNutritionFactsOcrMessage('Detected from label with OCR. Please review before saving.');
+      setNutritionFactsStep('review');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const normalizedMessage = message.toLowerCase();
+      const isExpectedOcrFallback =
+        normalizedMessage.includes('ocr is not available') ||
+        normalizedMessage.includes('cannot find native module') ||
+        normalizedMessage.includes('expotextextractor') ||
+        normalizedMessage.includes('no text was detected');
+      const fallbackMessage = normalizedMessage.includes('no text')
+        ? 'No text was detected. You can paste or type the nutrition values manually.'
+        : 'OCR is not available in this build. Paste nutrition text to continue.';
+
+      if (isExpectedOcrFallback) {
+        console.warn('[Nutrition OCR fallback]', message);
+      } else {
+        console.error('Unexpected nutrition OCR error', error);
+      }
+
+      setNutritionFactsOcrMessage(fallbackMessage);
+      setNutritionFactsStep('manualPaste');
+    } finally {
+      setIsExtractingNutritionText(false);
+    }
+  }
+
+  async function pickNutritionFactsFromGallery(barcode: string) {
+    beginNutritionFactsScan(barcode);
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert('Permission needed', 'Allow access to pick a nutrition label image.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      allowsEditing: true,
+      aspect: [4, 3],
+      mediaTypes: ['images'],
+      quality: 0.8,
+    });
+
+    if (result.canceled) {
+      return;
+    }
+
+    const imageUri = result.assets?.[0]?.uri;
+
+    if (!imageUri) {
+      setNutritionFactsError('Could not read selected image. Try again.');
+      setNutritionFactsStep('error');
+      return;
+    }
+
+    await handleNutritionLabelImageSelected(imageUri);
+  }
+
+  function handleParseNutritionFactsText() {
+    const parsed = parseNutritionFactsText(nutritionFactsText);
+    console.log('[Nutrition OCR] parsed', parsed);
+    applyParsedNutritionFacts(parsed);
+    Keyboard.dismiss();
+    setNutritionFactsOcrMessage('We filled what we could read. Please review before saving.');
+    setNutritionFactsError(null);
+    setNutritionFactsStep('review');
+  }
+
+  async function handleSaveNutritionFactsProduct() {
+    if (!nutritionFactsBarcode) {
+      return;
+    }
+
+    if (!nutritionProductName.trim()) {
+      Alert.alert('Product name required', 'Enter a product name before saving.');
+      return;
+    }
+
+    if (
+      !isReviewNumberInRange(nutritionCalories, 0, 1000) ||
+      !isReviewNumberInRange(nutritionProtein, 0, 100) ||
+      !isReviewNumberInRange(nutritionCarbs, 0, 100) ||
+      !isReviewNumberInRange(nutritionFat, 0, 100)
+    ) {
+      Alert.alert('Nutrition incomplete', 'Complete the missing nutrition values to save this product.');
+      return;
+    }
+
+    if (!canSpendTokens(2)) {
+      showNotEnoughTokensAlert();
+      return;
+    }
+
+    if (isSavingNutritionProduct) {
+      return;
+    }
+
+    setIsSavingNutritionProduct(true);
+
+    const baseQuantity = nutritionServingBasis === 'serving' ? 1 : 100;
+    const servingUnit =
+      nutritionServingBasis === '100ml' ? 'ml' : nutritionServingBasis === 'serving' ? 'serving' : 'g';
+    const food: FoodDefinition = {
+      id: nutritionFactsBarcode,
+      barcode: nutritionFactsBarcode,
+      name: nutritionProductName.trim(),
+      category: 'Scanned food',
+      baseQuantity,
+      unit: servingUnit,
+      calories: Math.round(parseReviewNumber(nutritionCalories) ?? 0),
+      baseCalories: Math.round(parseReviewNumber(nutritionCalories) ?? 0),
+      protein: round(parseReviewNumber(nutritionProtein) ?? 0),
+      carbs: round(parseReviewNumber(nutritionCarbs) ?? 0),
+      fat: round(parseReviewNumber(nutritionFat) ?? 0),
+      sugar: nutritionSugar ? round(parseReviewNumber(nutritionSugar) ?? 0) : undefined,
+      salt: nutritionSalt ? round(parseReviewNumber(nutritionSalt) ?? 0) : undefined,
+      saturatedFat: nutritionSaturatedFat ? round(parseReviewNumber(nutritionSaturatedFat) ?? 0) : undefined,
+      keywords: [nutritionProductName.trim(), nutritionFactsBarcode],
+      source: 'barcode',
+    };
+
+    try {
+      const cachedTemplate = await addFoodTemplate({
+        barcode: nutritionFactsBarcode,
+        name: food.name,
+        category: food.category,
+        baseQuantity: food.baseQuantity,
+        unit: food.unit,
+        baseCalories: food.baseCalories,
+        protein: food.protein,
+        carbs: food.carbs,
+        fat: food.fat,
+        sugar: food.sugar,
+        salt: food.salt,
+        saturatedFat: food.saturatedFat,
+        keywords: food.keywords,
+        source: 'barcode',
+      });
+      const cachedFood = templateToFoodDefinition(cachedTemplate);
+
+      await saveScannedFoodToSupabase(nutritionFactsBarcode, cachedFood);
+      await spendTokens(2, 'scan_food');
+      resetNutritionFactsFlow();
+      setPendingScannedFood(cachedFood);
+    } finally {
+      setIsSavingNutritionProduct(false);
+    }
+  }
+
+  async function handleSaveMealPhotoEstimate() {
+    const estimate = estimateMealFromPhoto({
+      cookingFat: mealPhotoCookingFat,
+      foodType: mealPhotoFoodType,
+      portionSize: mealPhotoPortion,
+      sauce: mealPhotoSauce,
+    });
+
+    if (!canSpendTokens(MEAL_PHOTO_TOKEN_COST)) {
+      showNotEnoughTokensAlert();
+      return;
+    }
+
+    await addFood({
+      name: estimate.name,
+      foodKey: 'meal_photo:estimated_meal',
+      source: 'meal_photo',
+      calories: estimate.calories,
+      quantity: '1 plate',
+      quantityValue: 1,
+      unit: 'plate',
+      protein: estimate.protein,
+      carbs: estimate.carbs,
+      fat: estimate.fat,
+      baseQuantity: 1,
+      baseCalories: estimate.calories,
+      baseProtein: estimate.protein,
+      baseCarbs: estimate.carbs,
+      baseFat: estimate.fat,
+    });
+    await spendTokens(MEAL_PHOTO_TOKEN_COST, 'meal_photo_estimate');
+    resetMealPhotoFlow();
+    router.push('/');
   }
 
   function closeDetails() {
@@ -671,7 +1310,8 @@ export default function AddFoodScreen() {
       setManualMode(false);
       setSelectedFood(null);
     } else {
-      router.push('/');
+      resetTransientAddState();
+      router.replace('/');
     }
   }
 
@@ -983,18 +1623,34 @@ export default function AddFoodScreen() {
       return;
     }
 
+    if (manualBarcode && !canSpendTokens(2)) {
+      showNotEnoughTokensAlert();
+      return;
+    }
+
     const nextTemplate = await addFoodTemplate({
+      barcode: manualBarcode ?? undefined,
       name,
+      category: manualBarcode ? 'Scanned food' : undefined,
       baseQuantity: round(toNumber(quantity)),
       unit: unit.trim(),
       baseCalories: Math.round(toNumber(calories)),
       protein: round(toNumber(protein)),
       carbs: round(toNumber(carbs)),
       fat: round(toNumber(fat)),
+      keywords: manualBarcode ? [name.trim(), manualBarcode] : undefined,
+      source: manualBarcode ? 'barcode' : 'custom',
     });
     const nextFood = templateToFoodDefinition(nextTemplate);
+
+    if (manualBarcode) {
+      await saveScannedFoodToSupabase(manualBarcode, nextFood);
+      await spendTokens(2, 'scan_food');
+    }
+
     setSelectedFood(nextFood);
     setManualMode(false);
+    setManualBarcode(null);
     Alert.alert('Food saved', `${name.trim()} will appear in search results.`);
   }
 
@@ -1004,13 +1660,18 @@ export default function AddFoodScreen() {
       return;
     }
 
+    if (manualBarcode && !canSpendTokens(2)) {
+      showNotEnoughTokensAlert();
+      return;
+    }
+
     setIsSaving(true);
 
     try {
       const input = {
         name,
-        foodKey: selectedFood ? getFoodKey(selectedFood) : undefined,
-        source: selectedFood?.source ?? (manualMode ? 'manual' : undefined),
+        foodKey: selectedFood ? getFoodKey(selectedFood) : manualBarcode ? `barcode:${manualBarcode}` : undefined,
+        source: selectedFood?.source ?? (manualBarcode ? 'barcode' : manualMode ? 'manual' : undefined),
         calories: Math.round(toNumber(calories)),
         quantity: `${round(toNumber(quantity))} ${unit.trim()}`,
         quantityValue: round(toNumber(quantity)),
@@ -1027,12 +1688,33 @@ export default function AddFoodScreen() {
 
       if (editingEntry) {
         await updateFood(editingEntry.id, input);
+        resetTransientAddState();
       } else {
         await addFood(input);
+        if (manualBarcode) {
+          const scannedFood: FoodDefinition = {
+            id: manualBarcode,
+            barcode: manualBarcode,
+            name: name.trim(),
+            category: 'Scanned food',
+            baseQuantity: round(toNumber(quantity)),
+            unit: unit.trim(),
+            calories: Math.round(toNumber(calories)),
+            baseCalories: Math.round(toNumber(calories)),
+            protein: round(toNumber(protein)),
+            carbs: round(toNumber(carbs)),
+            fat: round(toNumber(fat)),
+            keywords: [name.trim(), manualBarcode],
+            source: 'barcode',
+          };
+
+          await saveScannedFoodToSupabase(manualBarcode, scannedFood);
+          await spendTokens(2, 'scan_food');
+        }
         resetForm();
       }
 
-      router.push('/');
+      router.replace('/');
     } finally {
       setIsSaving(false);
     }
@@ -1043,20 +1725,20 @@ export default function AddFoodScreen() {
     const isPinned = pinnedFoodKeys.includes(foodKey);
 
     return (
-      <View style={styles.foodResult}>
+      <View style={[styles.foodResult, surfaceStyle]}>
         <Pressable
           accessibilityRole="button"
           onPress={() => openFoodDetails(food)}
           style={({ pressed }) => [styles.foodResultMain, pressed && styles.foodResultPressed]}>
           <View style={styles.foodResultHeader}>
-            <Text style={styles.foodResultName}>{food.name}</Text>
-            <Text style={styles.foodResultCalories}>{food.baseCalories} cal</Text>
+            <Text style={[styles.foodResultName, textStyle]}>{food.name}</Text>
+            <Text style={[styles.foodResultCalories, { color: theme.success }]}>{food.baseCalories} cal</Text>
           </View>
-          <Text style={styles.foodResultMeta}>
+          <Text style={[styles.foodResultMeta, mutedTextStyle]}>
             {food.category} · per {food.baseQuantity}
             {food.unit}
           </Text>
-          <Text style={styles.foodResultMeta}>
+          <Text style={[styles.foodResultMeta, mutedTextStyle]}>
             P {food.protein}g / C {food.carbs}g / F {food.fat}g
           </Text>
         </Pressable>
@@ -1065,14 +1747,76 @@ export default function AddFoodScreen() {
           onPress={() => togglePinnedFood(foodKey)}
           style={({ pressed }) => [
             styles.pinButton,
+            { backgroundColor: theme.chipBackground, borderLeftColor: theme.cardBorder },
             isPinned && styles.pinButtonActive,
             pressed && styles.pinButtonPressed,
           ]}>
-          <Text style={[styles.pinButtonText, isPinned && styles.pinButtonTextActive]}>
+          <Text style={[styles.pinButtonText, { color: isPinned ? theme.primary : theme.mutedText }]}>
             {isPinned ? 'Pinned' : 'Pin'}
           </Text>
         </Pressable>
       </View>
+    );
+  }
+
+  function renderPremiumFoodResult({ item: food }: { item: FoodDefinition }) {
+    const foodKey = getFoodKey(food);
+    const isPinned = pinnedFoodKeys.includes(foodKey);
+
+    return (
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => openFoodDetails(food)}
+        style={({ pressed }) => [
+          styles.foodResultPremium,
+          {
+            backgroundColor: theme.card,
+            borderColor: theme.cardBorder,
+            shadowColor: theme.shadow,
+          },
+          pressed && styles.foodResultPressed,
+        ]}>
+        <View style={[styles.foodAvatar, { backgroundColor: theme.chipBackground }]}>
+          <Text style={styles.foodAvatarText}>{getFoodAvatar(food)}</Text>
+        </View>
+        <View style={styles.foodResultPremiumMain}>
+          <Text numberOfLines={1} style={[styles.foodResultName, textStyle]}>
+            {food.name}
+          </Text>
+          <Text numberOfLines={1} style={[styles.foodResultMeta, mutedTextStyle]}>
+            {food.category} - per {food.baseQuantity}
+            {food.unit}
+          </Text>
+          <Text numberOfLines={1} style={[styles.foodResultMeta, mutedTextStyle]}>
+            P {food.protein}g / C {food.carbs}g / F {food.fat}g
+          </Text>
+        </View>
+        <View style={styles.foodResultTrailing}>
+          <View style={styles.foodResultCaloriesBlock}>
+            <Text style={[styles.foodResultCaloriesPremium, { color: theme.success }]}>
+              {food.baseCalories}
+            </Text>
+            <Text style={[styles.foodResultCalLabel, mutedTextStyle]}>cal</Text>
+          </View>
+          <Pressable
+            accessibilityLabel={isPinned ? 'Unpin food' : 'Pin food'}
+            accessibilityRole="button"
+            hitSlop={10}
+            onPress={(event) => {
+              event.stopPropagation();
+              togglePinnedFood(foodKey);
+            }}
+            style={({ pressed }) => [
+              styles.pinButtonPremium,
+              { backgroundColor: isPinned ? theme.primary : theme.chipBackground },
+              pressed && styles.pinButtonPressed,
+            ]}>
+            <Text style={[styles.pinButtonTextPremium, { color: isPinned ? '#FFFFFF' : theme.mutedText }]}>
+              {isPinned ? '★' : '☆'}
+            </Text>
+          </Pressable>
+        </View>
+      </Pressable>
     );
   }
 
@@ -1081,12 +1825,12 @@ export default function AddFoodScreen() {
       <Pressable
         accessibilityRole="button"
         onPress={() => openIngredientDetails(food)}
-        style={({ pressed }) => [styles.ingredientResult, pressed && styles.foodResultPressed]}>
+        style={({ pressed }) => [styles.ingredientResult, surfaceStyle, pressed && styles.foodResultPressed]}>
         <View style={styles.foodResultHeader}>
-          <Text style={styles.foodResultName}>{food.name}</Text>
-          <Text style={styles.foodResultCalories}>{food.baseCalories} cal</Text>
+          <Text style={[styles.foodResultName, textStyle]}>{food.name}</Text>
+          <Text style={[styles.foodResultCalories, { color: theme.success }]}>{food.baseCalories} cal</Text>
         </View>
-        <Text style={styles.foodResultMeta}>
+        <Text style={[styles.foodResultMeta, mutedTextStyle]}>
           {food.category} · per {food.baseQuantity}
           {food.unit}
         </Text>
@@ -1094,16 +1838,176 @@ export default function AddFoodScreen() {
     );
   }
 
+  if (activeMode === 'mealPhoto') {
+    const mealPhotoEstimate = estimateMealFromPhoto({
+      cookingFat: mealPhotoCookingFat,
+      foodType: mealPhotoFoodType,
+      portionSize: mealPhotoPortion,
+      sauce: mealPhotoSauce,
+    });
+
+    return (
+      <KeyboardAvoidingView
+        behavior={Platform.select({ ios: 'padding', android: undefined })}
+        style={styles.keyboardView}>
+        <Screen>
+          <AddModeHeader onBack={() => setActiveMode('find')} title="Scan meal" />
+
+          <ScrollView contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">
+            <View style={[styles.card, surfaceStyle]}>
+              <Text style={[styles.title, textStyle]}>Scan meal</Text>
+              <Text style={[styles.tokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
+              <Text style={[styles.subtitle, mutedTextStyle]}>
+                Take or choose a meal photo, then review an estimated calorie and macro result before saving.
+              </Text>
+
+              {!mealPhotoUri ? (
+                <View style={styles.rowFields}>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => selectMealPhoto('camera')}
+                    style={({ pressed }) => [styles.manualButton, styles.flexField, pressed && styles.buttonPressed]}>
+                    <Text style={styles.manualButtonText}>Take photo</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => selectMealPhoto('library')}
+                    style={({ pressed }) => [styles.secondaryButton, styles.flexField, pressed && styles.buttonPressed]}>
+                    <Text style={styles.secondaryButtonText}>Pick image</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {mealPhotoUri && !mealPhotoEstimateVisible ? (
+                <View style={[styles.ingredientEditor, softSurfaceStyle]}>
+                  <Text style={[styles.resultsTitle, textStyle]}>We need a few details to improve the estimate.</Text>
+                  <MealPhotoChoiceGroup
+                    label="Portion size"
+                    options={[
+                      ['small', 'Small'],
+                      ['medium', 'Medium'],
+                      ['large', 'Large'],
+                    ]}
+                    selectedValue={mealPhotoPortion}
+                    onSelect={(value) => setMealPhotoPortion(value as MealPhotoPortionSize)}
+                  />
+                  <MealPhotoChoiceGroup
+                    label="Cooking fat"
+                    options={[
+                      ['none', 'No/unknown'],
+                      ['little', 'A little oil'],
+                      ['lot', 'A lot of oil'],
+                    ]}
+                    selectedValue={mealPhotoCookingFat}
+                    onSelect={(value) => setMealPhotoCookingFat(value as MealPhotoCookingFat)}
+                  />
+                  <MealPhotoChoiceGroup
+                    label="Sauce"
+                    options={[
+                      ['none', 'No sauce'],
+                      ['light', 'Light sauce'],
+                      ['heavy', 'Heavy sauce'],
+                    ]}
+                    selectedValue={mealPhotoSauce}
+                    onSelect={(value) => setMealPhotoSauce(value as MealPhotoSauce)}
+                  />
+                  <MealPhotoChoiceGroup
+                    label="Main food type"
+                    options={[
+                      ['rice_chicken', 'Rice/chicken'],
+                      ['pasta', 'Pasta'],
+                      ['salad', 'Salad'],
+                      ['sandwich', 'Sandwich'],
+                      ['mixed', 'Mixed meal'],
+                      ['other', 'Other'],
+                    ]}
+                    selectedValue={mealPhotoFoodType}
+                    onSelect={(value) => setMealPhotoFoodType(value as MealPhotoFoodType)}
+                  />
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => setMealPhotoEstimateVisible(true)}
+                    style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
+                    <Text style={styles.buttonText}>Generate estimate</Text>
+                  </Pressable>
+                  <Pressable accessibilityRole="button" onPress={resetMealPhotoFlow}>
+                    <Text style={[styles.closeButtonText, { color: theme.mutedText }]}>Cancel</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {mealPhotoUri && mealPhotoEstimateVisible ? (
+                <MealPhotoEstimateCard
+                  canSave={canSpendTokens(MEAL_PHOTO_TOKEN_COST)}
+                  estimate={mealPhotoEstimate}
+                  imageUri={mealPhotoUri}
+                  onCancel={resetMealPhotoFlow}
+                  onEdit={() => setMealPhotoEstimateVisible(false)}
+                  onGetTokens={() => router.push({ pathname: '/settings', params: { panel: 'tokens' } })}
+                  onRetake={resetMealPhotoFlow}
+                  onSave={handleSaveMealPhotoEstimate}
+                />
+              ) : null}
+            </View>
+          </ScrollView>
+        </Screen>
+      </KeyboardAvoidingView>
+    );
+  }
+
   if (activeMode === 'scan') {
     return (
       <ScanProductScreen
-        onAddMyFood={() => {
+        onBack={() => {
+          setPendingScannedFood(null);
+          setIncompleteScannedProduct(null);
+          setNetworkErrorBarcode(null);
           setActiveMode('find');
-          openManualDetails();
         }}
-        onBack={() => setActiveMode('find')}
-        onPrepareMeal={() => setActiveMode('meal')}
+        onDismissReview={handleDismissReviewedProduct}
+        onAddReviewedProduct={handleAddReviewedProduct}
+        onAddScannedProductManually={handleAddScannedProductManually}
+        onCompleteScannedProduct={handleCompleteScannedProduct}
+        onParseNutritionFactsText={handleParseNutritionFactsText}
+        incompleteProduct={incompleteScannedProduct}
+        networkErrorBarcode={networkErrorBarcode}
+        nutritionFactsBarcode={nutritionFactsBarcode}
+        nutritionFactsImageUri={nutritionFactsImageUri}
+        nutritionFactsText={nutritionFactsText}
+        nutritionFactsOcrMessage={nutritionFactsOcrMessage}
+        nutritionFactsStep={nutritionFactsStep}
+        nutritionFactsError={nutritionFactsError}
+        isExtractingNutritionText={isExtractingNutritionText}
+        isSavingNutritionProduct={isSavingNutritionProduct}
+        nutritionServingBasis={nutritionServingBasis}
+        nutritionProductName={nutritionProductName}
+        nutritionCalories={nutritionCalories}
+        nutritionProtein={nutritionProtein}
+        nutritionCarbs={nutritionCarbs}
+        nutritionFat={nutritionFat}
+        nutritionSugar={nutritionSugar}
+        nutritionSalt={nutritionSalt}
+        nutritionSaturatedFat={nutritionSaturatedFat}
         onLookupBarcode={handleBarcodeScanned}
+        pendingFood={pendingScannedFood}
+        onBeginNutritionFactsScan={beginNutritionFactsScan}
+        onBackToNutritionPaste={() => setNutritionFactsStep('manualPaste')}
+        onNutritionLabelImageSelected={handleNutritionLabelImageSelected}
+        onPickNutritionFactsFromGallery={pickNutritionFactsFromGallery}
+        onCancelNutritionFacts={resetNutritionFactsFlow}
+        onFillNutritionFactsManually={handleFillNutritionFactsManually}
+        onSaveNutritionFactsProduct={handleSaveNutritionFactsProduct}
+        parsedNutritionFacts={parsedNutritionFacts}
+        setNutritionCalories={setNutritionCalories}
+        setNutritionCarbs={setNutritionCarbs}
+        setNutritionFactsText={setNutritionFactsText}
+        setNutritionFat={setNutritionFat}
+        setNutritionProductName={setNutritionProductName}
+        setNutritionProtein={setNutritionProtein}
+        setNutritionServingBasis={setNutritionServingBasis}
+        setNutritionSalt={setNutritionSalt}
+        setNutritionSaturatedFat={setNutritionSaturatedFat}
+        setNutritionSugar={setNutritionSugar}
         tokenBalance={tokenBalance}
       />
     );
@@ -1115,30 +2019,11 @@ export default function AddFoodScreen() {
         behavior={Platform.select({ ios: 'padding', android: undefined })}
         style={styles.keyboardView}>
         <Screen>
-          <View style={styles.modeSwitch}>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setActiveMode('find')}
-              style={styles.modeButton}>
-              <Text style={styles.modeButtonText}>Find food</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setActiveMode('meal')}
-              style={[styles.modeButton, styles.modeButtonActive]}>
-              <Text style={[styles.modeButtonText, styles.modeButtonTextActive]}>Prepare meal</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setActiveMode('scan')}
-              style={styles.modeButton}>
-              <Text style={styles.modeButtonText}>Scan product</Text>
-            </Pressable>
-          </View>
+          <AddModeHeader onBack={() => setActiveMode('find')} title="Prepare meal" />
 
-          <View style={styles.card}>
-            <Text style={styles.title}>Prepare meal</Text>
-            <Text style={styles.tokenText}>Tokens: {tokenBalance}</Text>
+          <View style={[styles.card, surfaceStyle]}>
+            <Text style={[styles.title, textStyle]}>Prepare meal</Text>
+            <Text style={[styles.tokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
             {isMealNameEditing || !mealName.trim() ? (
               <View style={styles.field}>
                 <Text style={styles.label}>Meal name</Text>
@@ -1151,7 +2036,12 @@ export default function AddFoodScreen() {
                     placeholder="Chicken rice bowl"
                     placeholderTextColor="#9A9FA6"
                     selectTextOnFocus
-                    style={[styles.input, styles.nameEditInput, mealNameError && styles.inputError]}
+                    style={[
+                      styles.input,
+                      styles.nameEditInput,
+                      inputStyle,
+                      mealNameError && styles.inputError,
+                    ]}
                     value={mealName}
                   />
                   <Pressable
@@ -1172,14 +2062,18 @@ export default function AddFoodScreen() {
               <Pressable
                 accessibilityRole="button"
                 onPress={startMealNameEdit}
-                style={({ pressed }) => [styles.mealNameCard, pressed && styles.foodResultPressed]}>
-                <Text style={styles.mealNameTitle}>{mealName.trim()}</Text>
-                <Text style={styles.mealNameHint}>Tap to rename</Text>
+                style={({ pressed }) => [
+                  styles.mealNameCard,
+                  softSurfaceStyle,
+                  pressed && styles.foodResultPressed,
+                ]}>
+                <Text style={[styles.mealNameTitle, textStyle]}>{mealName.trim()}</Text>
+                <Text style={[styles.mealNameHint, mutedTextStyle]}>Tap to rename</Text>
               </Pressable>
             )}
 
-            <View style={styles.totalCard}>
-              <Text style={styles.totalTitle}>{Math.round(mealTotals.calories)} cal</Text>
+            <View style={[styles.totalCard, softSurfaceStyle]}>
+              <Text style={[styles.totalTitle, textStyle]}>{Math.round(mealTotals.calories)} cal</Text>
               <Text style={styles.macroSummary}>
                 P {round(mealTotals.protein)}g / C {round(mealTotals.carbs)}g / F{' '}
                 {round(mealTotals.fat)}g
@@ -1187,8 +2081,8 @@ export default function AddFoodScreen() {
             </View>
           </View>
 
-          <View style={styles.card}>
-            <Text style={styles.resultsTitle}>Add ingredient</Text>
+          <View style={[styles.card, surfaceStyle]}>
+            <Text style={[styles.resultsTitle, textStyle]}>Add ingredient</Text>
             <View style={styles.field}>
               <Text style={styles.label}>Search ingredient</Text>
               <TextInput
@@ -1196,7 +2090,7 @@ export default function AddFoodScreen() {
                 onChangeText={setIngredientSearch}
                 placeholder="Rice, chicken, olive oil"
                 placeholderTextColor="#9A9FA6"
-                style={styles.input}
+                style={[styles.input, inputStyle]}
                 value={ingredientSearch}
               />
             </View>
@@ -1212,8 +2106,8 @@ export default function AddFoodScreen() {
             ) : null}
 
             {selectedIngredient ? (
-              <View style={styles.ingredientEditor}>
-                <Text style={styles.resultsTitle}>{selectedIngredient.name}</Text>
+              <View style={[styles.ingredientEditor, softSurfaceStyle]}>
+                <Text style={[styles.resultsTitle, textStyle]}>{selectedIngredient.name}</Text>
                 {ingredientServingPresets.length > 0 ? (
                   <View style={styles.presets}>
                     {ingredientServingPresets.map((preset) => {
@@ -1253,7 +2147,7 @@ export default function AddFoodScreen() {
                       onChangeText={handleIngredientQuantityChange}
                       placeholder="100"
                       placeholderTextColor="#9A9FA6"
-                      style={[styles.input, ingredientErrors.quantity && styles.inputError]}
+                      style={[styles.input, inputStyle, ingredientErrors.quantity && styles.inputError]}
                       value={ingredientQuantity}
                     />
                     <FieldError message={ingredientErrors.quantity} />
@@ -1265,7 +2159,7 @@ export default function AddFoodScreen() {
                       onChangeText={setIngredientUnit}
                       placeholder="g"
                       placeholderTextColor="#9A9FA6"
-                      style={[styles.input, ingredientErrors.unit && styles.inputError]}
+                      style={[styles.input, inputStyle, ingredientErrors.unit && styles.inputError]}
                       value={ingredientUnit}
                     />
                     <FieldError message={ingredientErrors.unit} />
@@ -1280,7 +2174,7 @@ export default function AddFoodScreen() {
                     onChangeText={handleIngredientCaloriesChange}
                     placeholder="250"
                     placeholderTextColor="#9A9FA6"
-                    style={[styles.input, ingredientErrors.calories && styles.inputError]}
+                    style={[styles.input, inputStyle, ingredientErrors.calories && styles.inputError]}
                     value={ingredientCalories}
                   />
                   <FieldError message={ingredientErrors.calories} />
@@ -1313,19 +2207,19 @@ export default function AddFoodScreen() {
             ) : null}
           </View>
 
-          <View style={styles.card}>
-            <Text style={styles.resultsTitle}>Ingredients</Text>
+          <View style={[styles.card, surfaceStyle]}>
+            <Text style={[styles.resultsTitle, textStyle]}>Ingredients</Text>
             {mealIngredients.length === 0 ? (
-              <Text style={styles.foodResultMeta}>No ingredients yet.</Text>
+              <Text style={[styles.foodResultMeta, mutedTextStyle]}>No ingredients yet.</Text>
             ) : (
               mealIngredients.map((ingredient, index) => (
-                <View key={`${ingredient.foodId}-${index}`} style={styles.ingredientRow}>
+                <View key={`${ingredient.foodId}-${index}`} style={[styles.ingredientRow, softSurfaceStyle]}>
                   <View style={styles.flexField}>
-                    <Text style={styles.foodResultName}>
+                    <Text style={[styles.foodResultName, textStyle]}>
                       {ingredient.name} — {ingredient.quantity}
                       {ingredient.unit} — {ingredient.calories} cal
                     </Text>
-                    <Text style={styles.foodResultMeta}>
+                    <Text style={[styles.foodResultMeta, mutedTextStyle]}>
                       P {ingredient.protein}g / C {ingredient.carbs}g / F {ingredient.fat}g
                     </Text>
                   </View>
@@ -1333,13 +2227,13 @@ export default function AddFoodScreen() {
                     <Pressable
                       accessibilityRole="button"
                       onPress={() => handleEditIngredient(ingredient, index)}
-                      style={styles.smallAction}>
+                      style={[styles.smallAction, chipStyle]}>
                       <Text style={styles.smallActionText}>Edit</Text>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
                       onPress={() => handleRemoveIngredient(index)}
-                      style={styles.smallAction}>
+                      style={[styles.smallAction, chipStyle]}>
                       <Text style={styles.removeText}>Remove</Text>
                     </Pressable>
                   </View>
@@ -1388,20 +2282,24 @@ export default function AddFoodScreen() {
             <Pressable
               accessibilityRole="button"
               onPress={closeDetails}
-              style={({ pressed }) => [styles.closeButton, pressed && styles.buttonPressed]}>
+              style={({ pressed }) => [
+                styles.closeButton,
+                { backgroundColor: theme.card },
+                pressed && styles.buttonPressed,
+              ]}>
               <Text style={styles.closeButtonText}>{isEditing ? 'Cancel' : 'Back'}</Text>
             </Pressable>
           </View>
 
-          <View style={styles.card}>
-            <Text style={styles.title}>{manualMode ? 'Add my food' : name}</Text>
+          <View style={[styles.card, surfaceStyle]}>
+            <Text style={[styles.title, textStyle]}>{manualMode ? 'Add my food' : name}</Text>
             {!manualMode && selectedFood ? (
-              <Text style={styles.subtitle}>
+              <Text style={[styles.subtitle, mutedTextStyle]}>
                 {selectedFood.baseCalories} cal · base serving {selectedFood.baseQuantity}
                 {selectedFood.unit}
               </Text>
             ) : (
-              <Text style={styles.subtitle}>Create a reusable food and save it locally.</Text>
+              <Text style={[styles.subtitle, mutedTextStyle]}>Create a reusable food and save it locally.</Text>
             )}
 
             <View style={styles.field}>
@@ -1411,7 +2309,7 @@ export default function AddFoodScreen() {
                 onChangeText={setName}
                 placeholder="Food name"
                 placeholderTextColor="#9A9FA6"
-                style={[styles.input, foodErrors.name && styles.inputError]}
+                style={[styles.input, inputStyle, foodErrors.name && styles.inputError]}
                 value={name}
               />
               <FieldError message={foodErrors.name} />
@@ -1457,7 +2355,7 @@ export default function AddFoodScreen() {
                   onChangeText={handleQuantityChange}
                   placeholder="100"
                   placeholderTextColor="#9A9FA6"
-                  style={[styles.input, foodErrors.quantity && styles.inputError]}
+                  style={[styles.input, inputStyle, foodErrors.quantity && styles.inputError]}
                   value={quantity}
                 />
                 <FieldError message={foodErrors.quantity} />
@@ -1469,7 +2367,7 @@ export default function AddFoodScreen() {
                   onChangeText={setUnit}
                   placeholder="g"
                   placeholderTextColor="#9A9FA6"
-                  style={[styles.input, foodErrors.unit && styles.inputError]}
+                  style={[styles.input, inputStyle, foodErrors.unit && styles.inputError]}
                   value={unit}
                 />
                 <FieldError message={foodErrors.unit} />
@@ -1484,7 +2382,7 @@ export default function AddFoodScreen() {
                 onChangeText={handleCaloriesChange}
                 placeholder="250"
                 placeholderTextColor="#9A9FA6"
-                style={[styles.input, foodErrors.calories && styles.inputError]}
+                style={[styles.input, inputStyle, foodErrors.calories && styles.inputError]}
                 value={calories}
               />
               <FieldError message={foodErrors.calories} />
@@ -1499,7 +2397,7 @@ export default function AddFoodScreen() {
                   onChangeText={setProtein}
                   placeholder="0"
                   placeholderTextColor="#9A9FA6"
-                  style={[styles.input, foodErrors.protein && styles.inputError]}
+                  style={[styles.input, inputStyle, foodErrors.protein && styles.inputError]}
                   value={protein}
                 />
                 <FieldError message={foodErrors.protein} />
@@ -1512,7 +2410,7 @@ export default function AddFoodScreen() {
                   onChangeText={setCarbs}
                   placeholder="0"
                   placeholderTextColor="#9A9FA6"
-                  style={[styles.input, foodErrors.carbs && styles.inputError]}
+                  style={[styles.input, inputStyle, foodErrors.carbs && styles.inputError]}
                   value={carbs}
                 />
                 <FieldError message={foodErrors.carbs} />
@@ -1525,7 +2423,7 @@ export default function AddFoodScreen() {
                   onChangeText={setFat}
                   placeholder="0"
                   placeholderTextColor="#9A9FA6"
-                  style={[styles.input, foodErrors.fat && styles.inputError]}
+                  style={[styles.input, inputStyle, foodErrors.fat && styles.inputError]}
                   value={fat}
                 />
                 <FieldError message={foodErrors.fat} />
@@ -1581,42 +2479,54 @@ export default function AddFoodScreen() {
           keyExtractor={getFoodKey}
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
-          renderItem={renderFoodResult}
+          renderItem={renderPremiumFoodResult}
           ListHeaderComponent={
-            <View style={styles.searchHeader}>
-              <View style={styles.modeSwitch}>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => setActiveMode('find')}
-                  style={[styles.modeButton, styles.modeButtonActive]}>
-                  <Text style={[styles.modeButtonText, styles.modeButtonTextActive]}>Find food</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => setActiveMode('meal')}
-                  style={styles.modeButton}>
-                  <Text style={styles.modeButtonText}>Prepare meal</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => setActiveMode('scan')}
-                  style={styles.modeButton}>
-                  <Text style={styles.modeButtonText}>Scan product</Text>
-                </Pressable>
+            <View style={[styles.addHubHeader, surfaceStyle]}>
+              <View style={styles.addHubTitleGroup}>
+                <Text style={[styles.title, textStyle]}>Add food</Text>
+                <Text style={[styles.subtitle, mutedTextStyle]}>Search, scan, or build a meal</Text>
               </View>
-              <Text style={styles.title}>Find food</Text>
               <View style={styles.field}>
-                <Text style={styles.label}>Search foods</Text>
                 <TextInput
                   ref={searchInputRef}
                   autoCapitalize="words"
                   onChangeText={setSearch}
-                  placeholder="Rice, tuna, yogurt"
+                  placeholder="Search food, meal, barcode..."
                   placeholderTextColor="#9A9FA6"
-                  style={styles.input}
+                  style={[styles.input, styles.addHubSearchInput, inputStyle]}
                   value={search}
                 />
               </View>
+              <ScrollView
+                horizontal
+                contentContainerStyle={styles.quickActionRow}
+                keyboardShouldPersistTaps="handled"
+                showsHorizontalScrollIndicator={false}>
+                <AddQuickActionCard
+                  icon="barcode-outline"
+                  onPress={() => setActiveMode('scan')}
+                  subtitle="Barcode nutrition"
+                  title="Scan product"
+                />
+                <AddQuickActionCard
+                  icon="camera-outline"
+                  onPress={() => setActiveMode('mealPhoto')}
+                  subtitle="Photo estimate"
+                  title="Scan meal"
+                />
+                <AddQuickActionCard
+                  icon="restaurant-outline"
+                  onPress={() => setActiveMode('meal')}
+                  subtitle="Build recipe"
+                  title="Prepare meal"
+                />
+                <AddQuickActionCard
+                  icon="add-circle-outline"
+                  onPress={() => openManualDetails()}
+                  subtitle="Save your own"
+                  title="Add custom"
+                />
+              </ScrollView>
               <ScrollView
                 horizontal
                 contentContainerStyle={styles.categoryRow}
@@ -1632,13 +2542,14 @@ export default function AddFoodScreen() {
                       onPress={() => setSelectedCategory(category)}
                       style={({ pressed }) => [
                         styles.categoryButton,
+                        chipStyle,
                         isSelected && styles.categoryButtonSelected,
                         pressed && styles.buttonPressed,
                       ]}>
                       <Text
                         style={[
                           styles.categoryButtonText,
-                          isSelected && styles.categoryButtonTextSelected,
+                          { color: isSelected ? '#FFFFFF' : theme.mutedText },
                         ]}>
                         {category}
                       </Text>
@@ -1646,18 +2557,18 @@ export default function AddFoodScreen() {
                   );
                 })}
               </ScrollView>
-              <Text style={styles.resultsTitle}>{resultsTitle}</Text>
+              <Text style={[styles.resultsTitle, textStyle]}>{resultsTitle}</Text>
             </View>
           }
           ListFooterComponent={
             isSearching ? (
-              <View style={styles.manualPrompt}>
-                <Text style={styles.manualPromptText}>
+              <View style={[styles.manualPrompt, surfaceStyle]}>
+                <Text style={[styles.manualPromptText, textStyle]}>
                   {visibleFoods.length === 0 ? "Can't find this food?" : "Can't find your food?"}
                 </Text>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={openManualDetails}
+                  onPress={() => openManualDetails()}
                   style={({ pressed }) => [styles.manualButton, pressed && styles.buttonPressed]}>
                   <Text style={styles.manualButtonText}>Add my food</Text>
                 </Pressable>
@@ -1670,26 +2581,239 @@ export default function AddFoodScreen() {
   );
 }
 
+function MealPhotoChoiceGroup({
+  label,
+  onSelect,
+  options,
+  selectedValue,
+}: {
+  label: string;
+  onSelect: (value: string) => void;
+  options: Array<[string, string]>;
+  selectedValue: string;
+}) {
+  const theme = useAppTheme();
+
+  return (
+    <View style={styles.field}>
+      <Text style={[styles.label, { color: theme.text }]}>{label}</Text>
+      <View style={styles.presets}>
+        {options.map(([value, optionLabel]) => {
+          const isSelected = selectedValue === value;
+
+          return (
+            <Pressable
+              accessibilityRole="button"
+              key={value}
+              onPress={() => onSelect(value)}
+              style={({ pressed }) => [
+                styles.presetButton,
+                { backgroundColor: isSelected ? theme.primary : theme.chipBackground },
+                pressed && styles.buttonPressed,
+              ]}>
+              <Text
+                style={[
+                  styles.presetButtonText,
+                  { color: isSelected ? '#FFFFFF' : theme.text },
+                ]}>
+                {optionLabel}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function AddModeHeader({ onBack, title }: { onBack: () => void; title: string }) {
+  const theme = useAppTheme();
+
+  return (
+    <View style={[styles.modeHeader, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
+      <View style={styles.modeHeaderText}>
+        <Text style={[styles.modeHeaderTitle, { color: theme.text }]}>{title}</Text>
+        <Text style={[styles.modeHeaderSubtitle, { color: theme.mutedText }]}>Review and save when ready</Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        onPress={onBack}
+        style={({ pressed }) => [
+          styles.backToAddButton,
+          { backgroundColor: theme.chipBackground },
+          pressed && styles.buttonPressed,
+        ]}>
+        <Text style={[styles.backToAddText, { color: theme.text }]}>Back to Add</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function NutritionFactsField({
+  error,
+  label,
+  onChangeText,
+  required,
+  unit,
+  value,
+  variant = 'half',
+}: {
+  error?: string | null;
+  label: string;
+  onChangeText: (value: string) => void;
+  required?: boolean;
+  unit?: string;
+  value: string;
+  variant?: 'full' | 'half';
+}) {
+  return (
+    <View style={[styles.nutritionFieldCard, variant === 'full' ? styles.nutritionFieldFull : styles.nutritionFieldHalf, error && styles.nutritionFieldCardError]}>
+      <View style={styles.nutritionFieldHeader}>
+        <Text numberOfLines={1} style={styles.nutritionInputLabel}>{label}</Text>
+        {required ? <Text style={styles.nutritionRequiredBadge}>Required</Text> : null}
+      </View>
+      <View style={styles.nutritionInputRow}>
+        <TextInput
+          inputMode="decimal"
+          keyboardType="decimal-pad"
+          onChangeText={onChangeText}
+          placeholder="0"
+          placeholderTextColor="#9A9FA6"
+          style={styles.nutritionReviewInput}
+          value={value}
+        />
+        {unit ? <Text style={styles.nutritionUnitText}>{unit}</Text> : null}
+      </View>
+    </View>
+  );
+}
+
 type ScanProductScreenProps = {
-  onAddMyFood: () => void;
+  onAddReviewedProduct: () => void;
+  onAddScannedProductManually: (barcode: string) => void;
   onBack: () => void;
-  onPrepareMeal: () => void;
-  onLookupBarcode: (barcode: string) => Promise<'found' | 'not_found' | 'no_tokens'>;
+  onCompleteScannedProduct: (product: IncompleteScannedProduct) => void;
+  onDismissReview: () => void;
+  onParseNutritionFactsText: () => void;
+  onLookupBarcode: (barcode: string) => Promise<BarcodeLookupStatus>;
+  incompleteProduct: IncompleteScannedProduct | null;
+  networkErrorBarcode: string | null;
+  nutritionFactsBarcode: string | null;
+  nutritionFactsImageUri: string | null;
+  nutritionFactsText: string;
+  nutritionFactsOcrMessage: string | null;
+  nutritionFactsStep: NutritionFactsStep;
+  nutritionFactsError: string | null;
+  isExtractingNutritionText: boolean;
+  isSavingNutritionProduct: boolean;
+  nutritionServingBasis: NutritionServingBasis;
+  nutritionProductName: string;
+  nutritionCalories: string;
+  nutritionProtein: string;
+  nutritionCarbs: string;
+  nutritionFat: string;
+  nutritionSugar: string;
+  nutritionSalt: string;
+  nutritionSaturatedFat: string;
+  onBeginNutritionFactsScan: (barcode: string) => void;
+  onBackToNutritionPaste: () => void;
+  onCancelNutritionFacts: () => void;
+  onFillNutritionFactsManually: () => void;
+  onNutritionLabelImageSelected: (imageUri: string) => Promise<void>;
+  onPickNutritionFactsFromGallery: (barcode: string) => Promise<void>;
+  onSaveNutritionFactsProduct: () => void;
+  parsedNutritionFacts: ParsedNutritionFacts | null;
+  pendingFood: FoodDefinition | null;
+  setNutritionCalories: (value: string) => void;
+  setNutritionCarbs: (value: string) => void;
+  setNutritionFactsText: (value: string) => void;
+  setNutritionFat: (value: string) => void;
+  setNutritionProductName: (value: string) => void;
+  setNutritionProtein: (value: string) => void;
+  setNutritionServingBasis: (value: NutritionServingBasis) => void;
+  setNutritionSalt: (value: string) => void;
+  setNutritionSaturatedFat: (value: string) => void;
+  setNutritionSugar: (value: string) => void;
   tokenBalance: number;
 };
 
 function ScanProductScreen({
-  onAddMyFood,
+  onAddReviewedProduct,
+  onAddScannedProductManually,
   onBack,
+  onCompleteScannedProduct,
+  onDismissReview,
+  onParseNutritionFactsText,
   onLookupBarcode,
-  onPrepareMeal,
+  incompleteProduct,
+  networkErrorBarcode,
+  nutritionFactsBarcode,
+  nutritionFactsImageUri,
+  nutritionFactsText,
+  nutritionFactsOcrMessage,
+  nutritionFactsStep,
+  nutritionFactsError,
+  isExtractingNutritionText,
+  isSavingNutritionProduct,
+  nutritionServingBasis,
+  nutritionProductName,
+  nutritionCalories,
+  nutritionProtein,
+  nutritionCarbs,
+  nutritionFat,
+  nutritionSugar,
+  nutritionSalt,
+  nutritionSaturatedFat,
+  onBeginNutritionFactsScan,
+  onBackToNutritionPaste,
+  onCancelNutritionFacts,
+  onFillNutritionFactsManually,
+  onNutritionLabelImageSelected,
+  onPickNutritionFactsFromGallery,
+  onSaveNutritionFactsProduct,
+  parsedNutritionFacts,
+  pendingFood,
+  setNutritionCalories,
+  setNutritionCarbs,
+  setNutritionFactsText,
+  setNutritionFat,
+  setNutritionProductName,
+  setNutritionProtein,
+  setNutritionServingBasis,
+  setNutritionSalt,
+  setNutritionSaturatedFat,
+  setNutritionSugar,
   tokenBalance,
 }: ScanProductScreenProps) {
+  const theme = useAppTheme();
   const [permission, requestPermission] = useCameraPermissions();
+  const cameraRef = useRef<CameraView>(null);
+  const [scanMode, setScanMode] = useState<ScanMode>('barcode');
   const [scannedValue, setScannedValue] = useState<string | null>(null);
   const [notFoundValue, setNotFoundValue] = useState<string | null>(null);
-  const [notEnoughTokens, setNotEnoughTokens] = useState(false);
   const [isLookingUp, setIsLookingUp] = useState(false);
+  const [isCapturingNutritionLabel, setIsCapturingNutritionLabel] = useState(false);
+  const [cameraPreviewLayout, setCameraPreviewLayout] = useState<LayoutRect | null>(null);
+  const [nutritionFrameLayout, setNutritionFrameLayout] = useState<LayoutRect | null>(null);
+  const nutritionReviewMissingFields = [
+    !nutritionProductName.trim() ? 'product name' : null,
+    !nutritionFactsBarcode ? 'barcode' : null,
+    !isReviewNumberInRange(nutritionCalories, 0, 1000) ? 'calories' : null,
+    !isReviewNumberInRange(nutritionProtein, 0, 100) ? 'protein' : null,
+    !isReviewNumberInRange(nutritionCarbs, 0, 100) ? 'carbs' : null,
+    !isReviewNumberInRange(nutritionFat, 0, 100) ? 'fat' : null,
+  ].filter((field): field is string => Boolean(field));
+  const isNutritionReviewSaveEnabled =
+    nutritionFactsStep === 'review' &&
+    nutritionReviewMissingFields.length === 0 &&
+    tokenBalance >= 2 &&
+    !isSavingNutritionProduct;
+  const hasEnoughNutritionTextToParse = nutritionFactsText.trim().length >= 5;
+  const hasScanResult = Boolean(scannedValue || pendingFood || incompleteProduct || networkErrorBarcode || notFoundValue);
+  const shouldShowCamera =
+    scanMode === 'nutritionLabel'
+      ? nutritionFactsStep === 'idle' || nutritionFactsStep === 'loading'
+      : !hasScanResult;
 
   async function handleBarcodeScanned(result: BarcodeScanningResult) {
     if (scannedValue) {
@@ -1701,21 +2825,116 @@ function ScanProductScreen({
     const status = await onLookupBarcode(result.data);
     setIsLookingUp(false);
 
-    if (status === 'no_tokens') {
-      setNotEnoughTokens(true);
-      return;
-    }
-
     if (status === 'not_found') {
       setNotFoundValue(result.data);
     }
   }
 
-  function handleScanAgain() {
+  function resetBarcodeScanState() {
+    setScanMode('barcode');
     setScannedValue(null);
     setNotFoundValue(null);
-    setNotEnoughTokens(false);
     setIsLookingUp(false);
+    onDismissReview();
+    onCancelNutritionFacts();
+  }
+
+  function handleScanAgain() {
+    resetBarcodeScanState();
+  }
+
+  function handleStartNutritionFactsScan(barcode: string) {
+    onBeginNutritionFactsScan(barcode);
+    setScanMode('nutritionLabel');
+  }
+
+  function getImageSize(imageUri: string) {
+    return new Promise<{ width: number; height: number }>((resolve, reject) => {
+      Image.getSize(
+        imageUri,
+        (width, height) => resolve({ width, height }),
+        (error) => reject(error),
+      );
+    });
+  }
+
+  async function handleCaptureNutritionLabel() {
+    if (!cameraRef.current || isCapturingNutritionLabel) {
+      return;
+    }
+
+    setIsCapturingNutritionLabel(true);
+
+    try {
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.8,
+        skipProcessing: true,
+      });
+
+      if (!photo?.uri) {
+        throw new Error('Could not capture nutrition label image.');
+      }
+
+      let imageUri = photo.uri;
+
+      try {
+        const photoSize =
+          photo.width && photo.height
+            ? { width: photo.width, height: photo.height }
+            : await getImageSize(photo.uri);
+
+        if (!cameraPreviewLayout || !nutritionFrameLayout) {
+          throw new Error('Nutrition crop layout is not ready.');
+        }
+
+        imageUri = await cropCameraImageToFrame({
+          imageUri: photo.uri,
+          imageWidth: photoSize.width,
+          imageHeight: photoSize.height,
+          previewWidth: cameraPreviewLayout.width,
+          previewHeight: cameraPreviewLayout.height,
+          frameX: nutritionFrameLayout.x,
+          frameY: nutritionFrameLayout.y,
+          frameWidth: nutritionFrameLayout.width,
+          frameHeight: nutritionFrameLayout.height,
+        });
+      } catch (error) {
+        console.error('Nutrition label crop failed', error);
+      }
+
+      await onNutritionLabelImageSelected(imageUri);
+    } catch (error) {
+      console.error('Nutrition label capture failed', error);
+      Alert.alert('Could not capture label', 'Try again or pick a label from your gallery.');
+    } finally {
+      setIsCapturingNutritionLabel(false);
+    }
+  }
+
+  function handleBackToBarcodeScan() {
+    setScanMode('barcode');
+    onCancelNutritionFacts();
+  }
+
+  function handleNotNow() {
+    handleScanAgain();
+  }
+
+  async function handleTryAgain() {
+    const barcode = networkErrorBarcode ?? scannedValue;
+
+    if (!barcode) {
+      handleScanAgain();
+      return;
+    }
+
+    setIsLookingUp(true);
+    const status = await onLookupBarcode(barcode);
+    setIsLookingUp(false);
+
+    if (status === 'not_found') {
+      setNotFoundValue(barcode);
+    }
   }
 
   return (
@@ -1723,31 +2942,27 @@ function ScanProductScreen({
       behavior={Platform.select({ ios: 'padding', android: undefined })}
       style={styles.keyboardView}>
       <Screen>
-        <View style={styles.modeSwitch}>
-          <Pressable accessibilityRole="button" onPress={onBack} style={styles.modeButton}>
-            <Text style={styles.modeButtonText}>Find food</Text>
-          </Pressable>
-          <Pressable accessibilityRole="button" onPress={onPrepareMeal} style={styles.modeButton}>
-            <Text style={styles.modeButtonText}>Prepare meal</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => undefined}
-            style={[styles.modeButton, styles.modeButtonActive]}>
-            <Text style={[styles.modeButtonText, styles.modeButtonTextActive]}>Scan product</Text>
-          </Pressable>
-        </View>
+        <AddModeHeader onBack={onBack} title="Scan product" />
 
-        <View style={styles.card}>
-          <Text style={styles.title}>Scan product</Text>
-          <Text style={styles.tokenText}>Tokens: {tokenBalance}</Text>
-          <Text style={styles.subtitle}>Scan a barcode and match it against the local food database.</Text>
+        <View
+          style={[
+            styles.card,
+            {
+              backgroundColor: theme.card,
+              borderColor: theme.cardBorder,
+              borderWidth: 1,
+              shadowColor: theme.shadow,
+            },
+          ]}>
+          <Text style={[styles.title, { color: theme.text }]}>Scan product</Text>
+          <Text style={[styles.tokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
+          <Text style={[styles.subtitle, { color: theme.mutedText }]}>Scan a barcode and match it against the local food database.</Text>
 
           {!permission ? (
-            <Text style={styles.foodResultMeta}>Checking camera permission...</Text>
+            <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>Checking camera permission...</Text>
           ) : !permission.granted ? (
-            <View style={styles.manualPrompt}>
-              <Text style={styles.manualPromptText}>Camera permission is required.</Text>
+            <View style={[styles.manualPrompt, { backgroundColor: theme.cardAlt }]}>
+              <Text style={[styles.manualPromptText, { color: theme.text }]}>Camera permission is required.</Text>
               <Pressable
                 accessibilityRole="button"
                 onPress={requestPermission}
@@ -1755,62 +2970,402 @@ function ScanProductScreen({
                 <Text style={styles.manualButtonText}>Allow camera</Text>
               </Pressable>
             </View>
-          ) : (
-            <CameraView
-              barcodeScannerSettings={{
-                barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'],
-              }}
-              onBarcodeScanned={scannedValue ? undefined : handleBarcodeScanned}
-              style={styles.camera}
-            />
+          ) : !shouldShowCamera ? null : (
+            <View
+              onLayout={(event) => setCameraPreviewLayout(event.nativeEvent.layout)}
+              style={styles.cameraContainer}>
+              <CameraView
+                ref={cameraRef}
+                barcodeScannerSettings={{
+                  barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'],
+                }}
+                onBarcodeScanned={
+                  scanMode === 'barcode' && !scannedValue ? handleBarcodeScanned : undefined
+                }
+                style={styles.camera}
+              />
+              {scanMode === 'nutritionLabel' ? (
+                <View pointerEvents="box-none" style={styles.nutritionCameraOverlay}>
+                  <View
+                    onLayout={(event) => setNutritionFrameLayout(event.nativeEvent.layout)}
+                    style={styles.nutritionFrame}>
+                    <Text style={styles.nutritionFrameText}>Nutrition facts</Text>
+                  </View>
+                  <Text style={styles.nutritionCameraTip}>
+                    Place the nutrition table inside the frame. Hold steady and use good light.
+                  </Text>
+                  <View style={styles.nutritionCameraActions}>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={isCapturingNutritionLabel || isExtractingNutritionText}
+                      onPress={handleCaptureNutritionLabel}
+                      style={({ pressed }) => [
+                        styles.manualButton,
+                        styles.fullWidthButton,
+                        (isCapturingNutritionLabel || isExtractingNutritionText) && styles.buttonDisabled,
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Text style={styles.manualButtonText}>
+                        {isCapturingNutritionLabel || isExtractingNutritionText
+                          ? 'Reading nutrition label...'
+                          : 'Capture nutrition label'}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => {
+                        const barcode = nutritionFactsBarcode ?? notFoundValue ?? incompleteProduct?.barcode;
+
+                        if (barcode) {
+                          void onPickNutritionFactsFromGallery(barcode);
+                        }
+                      }}
+                      style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
+                      <Text style={styles.secondaryButtonText}>Pick label from gallery</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={handleBackToBarcodeScan}
+                      style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
+                      <Text style={styles.secondaryButtonText}>Back to barcode</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+            </View>
           )}
 
           {isLookingUp ? (
-            <View style={styles.manualPrompt}>
-              <Text style={styles.manualPromptText}>Looking up product...</Text>
-              <Text style={styles.foodResultMeta}>Checking local cache and Open Food Facts.</Text>
+            <View style={[styles.manualPrompt, { backgroundColor: theme.cardAlt }]}>
+              <Text style={[styles.manualPromptText, { color: theme.text }]}>Looking up product...</Text>
+              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>Checking local cache and Open Food Facts.</Text>
             </View>
           ) : null}
 
-          {notFoundValue ? (
-            <View style={styles.notFoundBox}>
-              <Text style={styles.manualPromptText}>Product not found</Text>
-              <Text style={styles.foodResultMeta}>Barcode: {notFoundValue}</Text>
-              <View style={styles.rowFields}>
+          {pendingFood && !isLookingUp ? (
+            <ProductRatingCard
+              food={pendingFood}
+              onAddToToday={onAddReviewedProduct}
+              onDismiss={handleNotNow}
+            />
+          ) : null}
+
+          {incompleteProduct && !isLookingUp && !nutritionFactsBarcode ? (
+            <View style={[styles.notFoundBox, { backgroundColor: theme.cardAlt }]}>
+              <Text style={[styles.manualPromptText, { color: theme.text }]}>
+                Product found, data incomplete
+              </Text>
+              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
+                {incompleteProduct.name}
+                {incompleteProduct.brand ? ` - ${incompleteProduct.brand}` : ''}
+              </Text>
+              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
+                Barcode: {incompleteProduct.barcode}
+              </Text>
+              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
+                {incompleteProduct.validation.reason}
+              </Text>
+              <View style={styles.actionColumn}>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={onAddMyFood}
-                  style={({ pressed }) => [styles.secondaryButton, styles.flexField, pressed && styles.buttonPressed]}>
-                  <Text style={styles.secondaryButtonText}>Add my food</Text>
+                  disabled={nutritionFactsStep === 'loading' || isExtractingNutritionText}
+                  onPress={() => handleStartNutritionFactsScan(incompleteProduct.barcode)}
+                  style={({ pressed }) => [
+                    styles.manualButton,
+                    styles.fullWidthButton,
+                    (nutritionFactsStep === 'loading' || isExtractingNutritionText) && styles.buttonDisabled,
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Text style={styles.manualButtonText}>Scan nutrition facts</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => onCompleteScannedProduct(incompleteProduct)}
+                  style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
+                  <Text style={styles.manualButtonText}>Complete manually</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
                   onPress={handleScanAgain}
+                  style={({ pressed }) => [styles.manualButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
+                  <Text style={styles.secondaryButtonText}>Scan again</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
+          {networkErrorBarcode && !isLookingUp ? (
+            <View style={[styles.notFoundBox, { backgroundColor: theme.isDark ? '#3B241D' : '#F8EDE9' }]}>
+              <Text style={[styles.manualPromptText, { color: theme.text }]}>
+                Could not check product database
+              </Text>
+              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
+                Barcode: {networkErrorBarcode}
+              </Text>
+              <View style={styles.rowFields}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleTryAgain}
                   style={({ pressed }) => [styles.manualButton, styles.flexField, pressed && styles.buttonPressed]}>
+                  <Text style={styles.manualButtonText}>Try again</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => onAddScannedProductManually(networkErrorBarcode)}
+                  style={({ pressed }) => [styles.secondaryButton, styles.flexField, pressed && styles.buttonPressed]}>
+                  <Text style={styles.secondaryButtonText}>Add manually</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
+          {notFoundValue && !nutritionFactsBarcode ? (
+            <View style={[styles.notFoundBox, { backgroundColor: theme.isDark ? '#3B241D' : '#F8EDE9' }]}>
+              <Text style={[styles.manualPromptText, { color: theme.text }]}>Product not found</Text>
+              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>Barcode: {notFoundValue}</Text>
+              <View style={styles.actionColumn}>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={nutritionFactsStep === 'loading' || isExtractingNutritionText}
+                  onPress={() => handleStartNutritionFactsScan(notFoundValue)}
+                  style={({ pressed }) => [
+                    styles.manualButton,
+                    styles.fullWidthButton,
+                    (nutritionFactsStep === 'loading' || isExtractingNutritionText) && styles.buttonDisabled,
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Text style={styles.manualButtonText}>
+                    {nutritionFactsStep === 'loading' || isExtractingNutritionText
+                      ? 'Reading nutrition label...'
+                      : 'Scan nutrition facts'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => onAddScannedProductManually(notFoundValue)}
+                  style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
+                  <Text style={styles.secondaryButtonText}>Add product manually</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleScanAgain}
+                  style={({ pressed }) => [styles.manualButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
                   <Text style={styles.manualButtonText}>Scan again</Text>
                 </Pressable>
               </View>
             </View>
           ) : null}
 
-          {notEnoughTokens ? (
-            <View style={styles.notFoundBox}>
-              <Text style={styles.manualPromptText}>Not enough tokens</Text>
-              <Text style={styles.foodResultMeta}>Add tokens to continue.</Text>
-              <View style={styles.rowFields}>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => router.push('/settings')}
-                  style={({ pressed }) => [styles.manualButton, styles.flexField, pressed && styles.buttonPressed]}>
-                  <Text style={styles.manualButtonText}>Get tokens</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={handleScanAgain}
-                  style={({ pressed }) => [styles.secondaryButton, styles.flexField, pressed && styles.buttonPressed]}>
-                  <Text style={styles.secondaryButtonText}>Scan again</Text>
-                </Pressable>
-              </View>
+          {nutritionFactsBarcode ? (
+            <View style={styles.nutritionFlow}>
+              {nutritionFactsStep === 'review' ? (
+                <>
+                  <View style={styles.nutritionFlowHeader}>
+                    <Pressable accessibilityRole="button" onPress={onBackToNutritionPaste}>
+                      <Text style={styles.nutritionBackText}>Back</Text>
+                    </Pressable>
+                    <Text style={styles.nutritionFlowTitle}>Review nutrition</Text>
+                    <Text style={styles.nutritionFlowSubtitle}>Check the values before saving this product.</Text>
+                  </View>
+
+                  <View style={styles.nutritionSummaryCard}>
+                    {nutritionFactsImageUri ? (
+                      <Image source={{ uri: nutritionFactsImageUri }} style={styles.nutritionThumbnail} />
+                    ) : (
+                      <View style={styles.nutritionThumbnailPlaceholder} />
+                    )}
+                    <View style={styles.nutritionSummaryText}>
+                      <TextInput
+                        onChangeText={setNutritionProductName}
+                        placeholder="Scanned product"
+                        placeholderTextColor="#9A9FA6"
+                        style={styles.nutritionNameInput}
+                        value={nutritionProductName}
+                      />
+                      <Text style={styles.nutritionBarcodeText}>Barcode {nutritionFactsBarcode}</Text>
+                    </View>
+                  </View>
+
+                  {parsedNutritionFacts?.missingFields.length ? (
+                    <Text style={styles.nutritionInlineWarning}>
+                      Missing: {parsedNutritionFacts.missingFields.join(', ')}
+                    </Text>
+                  ) : null}
+
+                  <View style={styles.nutritionGrid}>
+                    <NutritionFactsField
+                      error={!isReviewNumberInRange(nutritionCalories, 0, 1000) ? 'Required' : null}
+                      label="Calories"
+                      required
+                      unit="kcal"
+                      variant="full"
+                      value={nutritionCalories}
+                      onChangeText={setNutritionCalories}
+                    />
+                    <NutritionFactsField
+                      error={!isReviewNumberInRange(nutritionProtein, 0, 100) ? 'Required' : null}
+                      label="Protein"
+                      required
+                      unit="g"
+                      value={nutritionProtein}
+                      onChangeText={setNutritionProtein}
+                    />
+                    <NutritionFactsField
+                      error={!isReviewNumberInRange(nutritionCarbs, 0, 100) ? 'Required' : null}
+                      label="Carbs"
+                      required
+                      unit="g"
+                      value={nutritionCarbs}
+                      onChangeText={setNutritionCarbs}
+                    />
+                    <NutritionFactsField
+                      error={!isReviewNumberInRange(nutritionFat, 0, 100) ? 'Required' : null}
+                      label="Fat"
+                      required
+                      unit="g"
+                      value={nutritionFat}
+                      onChangeText={setNutritionFat}
+                    />
+                    <NutritionFactsField label="Sugar" unit="g" value={nutritionSugar} onChangeText={setNutritionSugar} />
+                    <NutritionFactsField label="Salt" unit="g" value={nutritionSalt} onChangeText={setNutritionSalt} />
+                    <NutritionFactsField
+                      label="Sat. fat"
+                      unit="g"
+                      value={nutritionSaturatedFat}
+                      onChangeText={setNutritionSaturatedFat}
+                    />
+                  </View>
+
+                  <View style={styles.nutritionSectionCard}>
+                    <Text style={styles.nutritionSectionTitle}>Serving basis</Text>
+                    <View style={styles.nutritionSegment}>
+                      {(['100g', '100ml', 'serving'] as NutritionServingBasis[]).map((basis) => {
+                        const active = nutritionServingBasis === basis;
+                        const label = basis === '100g' ? 'per 100g' : basis === '100ml' ? 'per 100ml' : 'per serving';
+
+                        return (
+                          <Pressable
+                            accessibilityRole="button"
+                            key={basis}
+                            onPress={() => setNutritionServingBasis(basis)}
+                            style={[styles.nutritionSegmentButton, active && styles.nutritionSegmentButtonActive]}>
+                            <Text style={[styles.nutritionSegmentText, active && styles.nutritionSegmentTextActive]}>
+                              {label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {nutritionReviewMissingFields.length > 0 ? (
+                    <Text style={styles.nutritionInlineWarning}>
+                      Complete required values: {nutritionReviewMissingFields.join(', ')}.
+                    </Text>
+                  ) : null}
+                  {tokenBalance < 2 ? (
+                    <Text style={styles.nutritionInlineWarning}>Not enough tokens</Text>
+                  ) : null}
+
+                  <View style={styles.nutritionActionBar}>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={!isNutritionReviewSaveEnabled}
+                      onPress={onSaveNutritionFactsProduct}
+                      style={({ pressed }) => [
+                        styles.nutritionPrimaryButton,
+                        !isNutritionReviewSaveEnabled && styles.buttonDisabled,
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Text style={styles.nutritionPrimaryText}>
+                        {isSavingNutritionProduct ? 'Saving...' : 'Save product - 2 tokens'}
+                      </Text>
+                    </Pressable>
+                    <View style={styles.nutritionSecondaryActions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => handleStartNutritionFactsScan(nutritionFactsBarcode)}
+                        style={({ pressed }) => [styles.nutritionGhostButton, styles.flexField, pressed && styles.buttonPressed]}>
+                        <Text style={styles.nutritionGhostText}>Retake</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={onCancelNutritionFacts}
+                        style={({ pressed }) => [styles.nutritionGhostButton, styles.flexField, pressed && styles.buttonPressed]}>
+                        <Text style={styles.nutritionGhostText}>Cancel</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={styles.nutritionFlowHeader}>
+                    <Pressable accessibilityRole="button" onPress={handleBackToBarcodeScan}>
+                      <Text style={styles.nutritionBackText}>Back</Text>
+                    </Pressable>
+                    <Text style={styles.nutritionFlowTitle}>Read nutrition label</Text>
+                    <Text style={styles.nutritionFlowSubtitle}>
+                      We couldn't read this product automatically. Add the nutrition values from the label.
+                    </Text>
+                  </View>
+
+                  <View style={styles.nutritionImageCard}>
+                    {nutritionFactsImageUri ? (
+                      <Image source={{ uri: nutritionFactsImageUri }} style={styles.nutritionFactsImage} />
+                    ) : null}
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => handleStartNutritionFactsScan(nutritionFactsBarcode)}
+                      style={styles.nutritionRetakePill}>
+                      <Text style={styles.nutritionRetakeText}>Retake</Text>
+                    </Pressable>
+                  </View>
+
+                  {nutritionFactsStep === 'loading' || isExtractingNutritionText ? (
+                    <Text style={styles.nutritionSubtleNote}>Reading nutrition label...</Text>
+                  ) : null}
+                  {nutritionFactsOcrMessage ? (
+                    <Text style={styles.nutritionSubtleNote}>
+                      OCR isn't available in this build, so paste the label text manually.
+                    </Text>
+                  ) : null}
+
+                  <View style={styles.nutritionSectionCard}>
+                    <Text style={styles.nutritionSectionTitle}>What to type</Text>
+                    <Text style={styles.nutritionHelpText}>Energy / Valeur energetique</Text>
+                    <Text style={styles.nutritionHelpText}>Protein / Proteines</Text>
+                    <Text style={styles.nutritionHelpText}>Fat / Lipides</Text>
+                    <Text style={styles.nutritionHelpText}>Carbs / Glucides</Text>
+                  </View>
+
+                  <View style={styles.field}>
+                    <Text style={styles.nutritionInputLabel}>Nutrition text</Text>
+                    <TextInput
+                      multiline
+                      onChangeText={setNutritionFactsText}
+                      placeholder={`Example:\nVALEUR ENERGETIQUE 239.2 KCAL\nPROTEINES 26.2G\nLIPIDES 14.5G\nGLUCIDES 1.2G`}
+                      placeholderTextColor="#A3A8B2"
+                      style={styles.nutritionPasteInput}
+                      value={nutritionFactsText}
+                    />
+                  </View>
+
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={!hasEnoughNutritionTextToParse || nutritionFactsStep === 'loading'}
+                    onPress={onParseNutritionFactsText}
+                    style={({ pressed }) => [
+                      styles.nutritionPrimaryButton,
+                      (!hasEnoughNutritionTextToParse || nutritionFactsStep === 'loading') && styles.buttonDisabled,
+                      pressed && styles.buttonPressed,
+                    ]}>
+                    <Text style={styles.nutritionPrimaryText}>Continue</Text>
+                  </Pressable>
+                  <Pressable accessibilityRole="button" onPress={onFillNutritionFactsManually}>
+                    <Text style={styles.nutritionTextButton}>Fill manually instead</Text>
+                  </Pressable>
+                </>
+              )}
             </View>
           ) : null}
         </View>
@@ -1837,6 +3392,63 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06,
     shadowRadius: 16,
     elevation: 2,
+  },
+  addHubHeader: {
+    gap: 16,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    padding: 18,
+    shadowColor: '#1E1F24',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.06,
+    shadowRadius: 16,
+    elevation: 2,
+  },
+  addHubTitleGroup: {
+    gap: 2,
+  },
+  addHubSearchInput: {
+    minHeight: 58,
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  quickActionRow: {
+    gap: 12,
+    paddingRight: 18,
+  },
+  modeHeader: {
+    minHeight: 76,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+  },
+  modeHeaderText: {
+    flex: 1,
+    gap: 3,
+  },
+  modeHeaderTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  modeHeaderSubtitle: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  backToAddButton: {
+    minHeight: 40,
+    justifyContent: 'center',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+  },
+  backToAddText: {
+    fontSize: 13,
+    fontWeight: '900',
   },
   modeSwitch: {
     flexDirection: 'row',
@@ -1943,6 +3555,301 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     fontSize: 16,
   },
+  nutritionTextInput: {
+    minHeight: 112,
+    paddingTop: 12,
+    textAlignVertical: 'top',
+  },
+  nutritionFactsImage: {
+    width: '100%',
+    height: 150,
+    borderRadius: 18,
+    backgroundColor: '#F3F4F6',
+  },
+  nutritionFlow: {
+    gap: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 24,
+    backgroundColor: '#FAFBFC',
+    padding: 18,
+    paddingBottom: 28,
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.08,
+    shadowRadius: 22,
+    elevation: 2,
+  },
+  nutritionFlowHeader: {
+    gap: 5,
+  },
+  nutritionBackText: {
+    alignSelf: 'flex-start',
+    color: '#2563EB',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  nutritionFlowTitle: {
+    color: '#111827',
+    fontSize: 25,
+    fontWeight: '900',
+  },
+  nutritionFlowSubtitle: {
+    color: '#6B7280',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  nutritionImageCard: {
+    position: 'relative',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    padding: 8,
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.06,
+    shadowRadius: 14,
+  },
+  nutritionRetakePill: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  nutritionRetakeText: {
+    color: '#2563EB',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  nutritionSectionCard: {
+    gap: 7,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    padding: 14,
+  },
+  nutritionSectionTitle: {
+    color: '#111827',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  nutritionHelpText: {
+    color: '#6B7280',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  nutritionInputLabel: {
+    color: '#1F2937',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  nutritionPasteInput: {
+    minHeight: 150,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    color: '#111827',
+    paddingHorizontal: 14,
+    paddingTop: 14,
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 21,
+    textAlignVertical: 'top',
+  },
+  nutritionPrimaryButton: {
+    minHeight: 52,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 16,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 14,
+  },
+  nutritionPrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  nutritionTextButton: {
+    color: '#2563EB',
+    fontSize: 14,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  nutritionSubtleNote: {
+    color: '#6B7280',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  nutritionSummaryCard: {
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    padding: 12,
+  },
+  nutritionThumbnail: {
+    width: 72,
+    height: 72,
+    borderRadius: 16,
+    backgroundColor: '#F3F4F6',
+  },
+  nutritionThumbnailPlaceholder: {
+    width: 72,
+    height: 72,
+    borderRadius: 16,
+    backgroundColor: '#F3F4F6',
+  },
+  nutritionSummaryText: {
+    flex: 1,
+    gap: 6,
+    minWidth: 0,
+  },
+  nutritionNameInput: {
+    minHeight: 42,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 14,
+    backgroundColor: '#F9FAFB',
+    color: '#111827',
+    paddingHorizontal: 12,
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  nutritionBarcodeText: {
+    color: '#6B7280',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  nutritionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  nutritionFieldCard: {
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    padding: 12,
+  },
+  nutritionFieldCardError: {
+    borderColor: '#D97706',
+    backgroundColor: '#FFFBEB',
+  },
+  nutritionFieldFull: {
+    width: '100%',
+  },
+  nutritionFieldHalf: {
+    width: '47.8%',
+    minWidth: 132,
+    flexGrow: 1,
+  },
+  nutritionFieldHeader: {
+    minHeight: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  nutritionReviewInput: {
+    minHeight: 42,
+    flex: 1,
+    color: '#111827',
+    fontSize: 20,
+    fontWeight: '900',
+    padding: 0,
+  },
+  nutritionInputRow: {
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: 14,
+    backgroundColor: '#F9FAFB',
+    paddingHorizontal: 12,
+  },
+  nutritionRequiredBadge: {
+    color: '#B45309',
+    fontSize: 10,
+    fontWeight: '900',
+  },
+  nutritionUnitText: {
+    color: '#6B7280',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  nutritionInlineWarning: {
+    color: '#B45309',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  nutritionSegment: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  nutritionSegmentButton: {
+    minHeight: 40,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 999,
+    backgroundColor: '#F9FAFB',
+    paddingHorizontal: 6,
+  },
+  nutritionSegmentButtonActive: {
+    borderColor: '#2563EB',
+    backgroundColor: '#EFF6FF',
+  },
+  nutritionSegmentText: {
+    color: '#6B7280',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  nutritionSegmentTextActive: {
+    color: '#2563EB',
+  },
+  nutritionActionBar: {
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
+    padding: 8,
+  },
+  nutritionSecondaryActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  nutritionGhostButton: {
+    minHeight: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+    backgroundColor: '#F3F4F6',
+    paddingHorizontal: 12,
+  },
+  nutritionGhostText: {
+    color: '#374151',
+    fontSize: 13,
+    fontWeight: '900',
+  },
   inputError: {
     borderColor: '#B95C3A',
     backgroundColor: '#FFF7F4',
@@ -1989,6 +3896,55 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#FFFFFF',
     overflow: 'hidden',
+  },
+  foodResultPremium: {
+    minHeight: 96,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#DADDD4',
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    shadowColor: '#1E1F24',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.05,
+    shadowRadius: 14,
+    elevation: 1,
+  },
+  foodAvatar: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+  },
+  foodAvatarText: {
+    fontSize: 22,
+  },
+  foodResultPremiumMain: {
+    flex: 1,
+    gap: 4,
+    minWidth: 0,
+  },
+  foodResultTrailing: {
+    alignItems: 'flex-end',
+    gap: 7,
+  },
+  foodResultCaloriesBlock: {
+    alignItems: 'flex-end',
+  },
+  foodResultCaloriesPremium: {
+    fontSize: 22,
+    fontWeight: '900',
+    lineHeight: 25,
+  },
+  foodResultCalLabel: {
+    fontSize: 11,
+    fontWeight: '900',
+    marginTop: -1,
   },
   foodResultMain: {
     flex: 1,
@@ -2041,6 +3997,18 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
   },
+  pinButtonPremium: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 16,
+  },
+  pinButtonTextPremium: {
+    fontSize: 17,
+    fontWeight: '900',
+    lineHeight: 19,
+  },
   pinButtonTextActive: {
     color: '#2563eb',
   },
@@ -2083,6 +4051,52 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderRadius: 8,
     backgroundColor: '#1E1F24',
+  },
+  cameraContainer: {
+    minHeight: 360,
+    overflow: 'hidden',
+    borderRadius: 8,
+    backgroundColor: '#1E1F24',
+  },
+  nutritionCameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0,0,0,0.18)',
+  },
+  nutritionFrame: {
+    height: 190,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 44,
+    marginBottom: 12,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.08)',
+  },
+  nutritionFrameText: {
+    overflow: 'hidden',
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '900',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  nutritionCameraTip: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  nutritionCameraActions: {
+    gap: 8,
+    marginTop: 12,
   },
   notFoundBox: {
     gap: 12,
@@ -2151,6 +4165,13 @@ const styles = StyleSheet.create({
   rowFields: {
     flexDirection: 'row',
     gap: 12,
+  },
+  actionColumn: {
+    gap: 10,
+  },
+  fullWidthButton: {
+    width: '100%',
+    minHeight: 48,
   },
   flexField: {
     flex: 1,

@@ -13,6 +13,9 @@ export type FoodDatabaseItem = {
   protein: number;
   carbs: number;
   fat: number;
+  sugar?: number;
+  salt?: number;
+  saturatedFat?: number;
   keywords: string[];
   servingPresets?: ServingPreset[];
 } & Food;
@@ -57,6 +60,9 @@ export const DEFAULT_FOODS: FoodDefinition[] = Array.from(
       protein: food.protein,
       carbs: food.carbs,
       fat: food.fat,
+      sugar: food.sugar,
+      salt: food.salt,
+      saturatedFat: food.saturatedFat,
       keywords: food.keywords,
       servingPresets: food.servingPresets,
       source: 'local' as const,

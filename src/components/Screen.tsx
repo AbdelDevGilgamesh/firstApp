@@ -2,21 +2,25 @@ import { PropsWithChildren } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useAppTheme } from '@/src/theme/appTheme';
+
 type ScreenProps = PropsWithChildren<{
   scroll?: boolean;
 }>;
 
 export function Screen({ children, scroll = true }: ScreenProps) {
+  const theme = useAppTheme();
+
   if (!scroll) {
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]} edges={['top', 'bottom']}>
         <View style={styles.content}>{children}</View>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]} edges={['top', 'bottom']}>
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         keyboardDismissMode="on-drag"
