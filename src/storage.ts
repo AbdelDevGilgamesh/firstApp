@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { NutritionProfile } from './utils/nutritionTargets';
 import { FoodEntry, FoodTemplate, MealTemplate, TodayDashboardStyle, WaterLog } from './types';
 
 const FOOD_ENTRIES_KEY = 'calorie-tracker.food-entries';
@@ -13,10 +14,17 @@ const WATER_INTAKE_PREFIX = 'calorie-tracker.water-intake.';
 const WATER_LOG_PREFIX = 'calorie-tracker.water-log.';
 const WATER_INTAKE_UNLOCKED_KEY = 'calorie-tracker.water-intake-unlocked';
 const WATER_GOAL_GLASSES_KEY = 'calorie-tracker.water-goal-glasses';
+const MACRO_GOALS_KEY = 'calorie-tracker.macro-goals';
+const NUTRITION_PROFILE_KEY = 'nutritionProfile';
 
 export const DEFAULT_DAILY_GOAL = 2000;
 export const DEFAULT_TODAY_DASHBOARD_STYLE: TodayDashboardStyle = 'classic';
 export const DEFAULT_WATER_GOAL_GLASSES = 8;
+export const DEFAULT_MACRO_GOALS = {
+  protein: 120,
+  carbs: 250,
+  fat: 70,
+};
 
 export async function loadFoodEntries() {
   try {
@@ -186,6 +194,60 @@ export async function saveDailyGoal(goal: number) {
     await AsyncStorage.setItem(DAILY_GOAL_KEY, String(goal));
   } catch (error) {
     console.warn('Failed to save daily goal to AsyncStorage.', error);
+  }
+}
+
+export async function loadMacroGoals() {
+  try {
+    const rawGoals = await AsyncStorage.getItem(MACRO_GOALS_KEY);
+
+    if (!rawGoals) {
+      return DEFAULT_MACRO_GOALS;
+    }
+
+    const parsedGoals = JSON.parse(rawGoals) as Partial<typeof DEFAULT_MACRO_GOALS>;
+
+    return {
+      protein: Number.isFinite(parsedGoals.protein) ? Number(parsedGoals.protein) : DEFAULT_MACRO_GOALS.protein,
+      carbs: Number.isFinite(parsedGoals.carbs) ? Number(parsedGoals.carbs) : DEFAULT_MACRO_GOALS.carbs,
+      fat: Number.isFinite(parsedGoals.fat) ? Number(parsedGoals.fat) : DEFAULT_MACRO_GOALS.fat,
+    };
+  } catch (error) {
+    console.warn('Failed to load macro goals from AsyncStorage.', error);
+    return DEFAULT_MACRO_GOALS;
+  }
+}
+
+export async function saveMacroGoals(goals: typeof DEFAULT_MACRO_GOALS) {
+  try {
+    await AsyncStorage.setItem(MACRO_GOALS_KEY, JSON.stringify(goals));
+  } catch (error) {
+    console.warn('Failed to save macro goals to AsyncStorage.', error);
+  }
+}
+
+export async function loadNutritionProfile(): Promise<NutritionProfile | null> {
+  try {
+    const rawProfile = await AsyncStorage.getItem(NUTRITION_PROFILE_KEY);
+
+    if (!rawProfile) {
+      return null;
+    }
+
+    const parsedProfile = JSON.parse(rawProfile) as NutritionProfile;
+
+    return parsedProfile && typeof parsedProfile === 'object' ? parsedProfile : null;
+  } catch (error) {
+    console.warn('Failed to load nutrition profile from AsyncStorage.', error);
+    return null;
+  }
+}
+
+export async function saveNutritionProfile(profile: NutritionProfile) {
+  try {
+    await AsyncStorage.setItem(NUTRITION_PROFILE_KEY, JSON.stringify(profile));
+  } catch (error) {
+    console.warn('Failed to save nutrition profile to AsyncStorage.', error);
   }
 }
 

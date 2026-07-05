@@ -9,7 +9,8 @@
     "web": "expo start --web",
     "generate:foods": "tsx scripts/generateFoodDatabase.ts",
     "import:foods": "tsx scripts/importOpenFoodFacts.ts",
-    "import:foods:api": "tsx scripts/importOpenFoodFactsApi.ts"
+    "import:foods:api": "tsx scripts/importOpenFoodFactsApi.ts",
+    "check:i18n": "tsx scripts/checkMissingTranslations.ts"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

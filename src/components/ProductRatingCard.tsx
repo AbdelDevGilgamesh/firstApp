@@ -1,5 +1,6 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
+import { PressableScale } from '@/src/components/PressableScale';
 import { useAppTheme } from '@/src/theme/appTheme';
 import {
   ProductHealthFood,
@@ -181,22 +182,21 @@ export function ProductRatingCard({ food, onAddToToday, onDismiss }: ProductRati
       </Text>
 
       <View style={styles.actions}>
-        <Pressable
+        <PressableScale
           accessibilityRole="button"
           onPress={onAddToToday}
-          style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}>
+          style={styles.primaryButton}>
           <Text style={styles.primaryButtonText}>Add to today</Text>
-        </Pressable>
-        <Pressable
+        </PressableScale>
+        <PressableScale
           accessibilityRole="button"
           onPress={onDismiss}
-          style={({ pressed }) => [
+          style={[
             styles.secondaryButton,
             { backgroundColor: theme.chipBackground },
-            pressed && styles.pressed,
           ]}>
           <Text style={[styles.secondaryButtonText, { color: theme.text }]}>Not now</Text>
-        </Pressable>
+        </PressableScale>
       </View>
     </View>
   );
@@ -418,8 +418,5 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     fontSize: 15,
     fontWeight: '900',
-  },
-  pressed: {
-    opacity: 0.82,
   },
 });

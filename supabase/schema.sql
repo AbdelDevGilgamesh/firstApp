@@ -16,9 +16,35 @@ $$;
 create table if not exists public.profiles (
   id uuid primary key default gen_random_uuid(),
   display_name text,
+  nutrition_goal text,
+  nutrition_style text,
+  age integer,
+  sex text,
+  height_cm numeric,
+  weight_kg numeric,
+  activity_level text,
+  target_calories integer,
+  target_protein numeric,
+  target_carbs numeric,
+  target_fat numeric,
+  nutrition_profile_updated_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.profiles
+add column if not exists nutrition_goal text,
+add column if not exists nutrition_style text,
+add column if not exists age integer,
+add column if not exists sex text,
+add column if not exists height_cm numeric,
+add column if not exists weight_kg numeric,
+add column if not exists activity_level text,
+add column if not exists target_calories integer,
+add column if not exists target_protein numeric,
+add column if not exists target_carbs numeric,
+add column if not exists target_fat numeric,
+add column if not exists nutrition_profile_updated_at timestamptz;
 
 create table if not exists public.token_wallets (
   id uuid primary key default gen_random_uuid(),
@@ -58,6 +84,7 @@ create table if not exists public.food_entries (
   base_protein numeric,
   base_carbs numeric,
   base_fat numeric,
+  meal_label text,
   entry_date date not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -80,6 +107,9 @@ add column if not exists base_carbs numeric;
 
 alter table if exists public.food_entries
 add column if not exists base_fat numeric;
+
+alter table if exists public.food_entries
+add column if not exists meal_label text;
 
 alter table if exists public.food_entries
 add column if not exists entry_date date;
@@ -250,6 +280,18 @@ create index if not exists meals_user_name_idx on public.meals(user_id, lower(na
 create index if not exists meal_ingredients_meal_id_idx on public.meal_ingredients(meal_id);
 create index if not exists scanned_foods_user_barcode_idx on public.scanned_foods_cache(user_id, barcode);
 
+create table if not exists public.daily_logging_streaks (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  current_streak integer not null default 0,
+  longest_streak integer not null default 0,
+  last_logged_date date,
+  updated_at timestamptz not null default now(),
+  unique (user_id)
+);
+
+create index if not exists daily_logging_streaks_user_idx on public.daily_logging_streaks(user_id);
+
 drop trigger if exists profiles_set_updated_at on public.profiles;
 create trigger profiles_set_updated_at
 before update on public.profiles
@@ -290,6 +332,11 @@ create trigger scanned_foods_cache_set_updated_at
 before update on public.scanned_foods_cache
 for each row execute function public.set_updated_at();
 
+drop trigger if exists daily_logging_streaks_set_updated_at on public.daily_logging_streaks;
+create trigger daily_logging_streaks_set_updated_at
+before update on public.daily_logging_streaks
+for each row execute function public.set_updated_at();
+
 alter table public.profiles enable row level security;
 alter table public.token_wallets enable row level security;
 alter table public.token_transactions enable row level security;
@@ -298,6 +345,7 @@ alter table public.custom_foods enable row level security;
 alter table public.meals enable row level security;
 alter table public.meal_ingredients enable row level security;
 alter table public.scanned_foods_cache enable row level security;
+alter table public.daily_logging_streaks enable row level security;
 
 -- Future auth policies: every user-owned table is restricted to auth.uid() = user_id.
 -- These policies are intentionally strict. The app should keep using AsyncStorage until
@@ -381,6 +429,13 @@ to anon
 using (true)
 with check (true);
 
+drop policy if exists "Temporary anon can manage test daily logging streaks" on public.daily_logging_streaks;
+create policy "Temporary anon can manage test daily logging streaks"
+on public.daily_logging_streaks for all
+to anon
+using (true)
+with check (true);
+
 drop policy if exists "Users can manage own food entries" on public.food_entries;
 create policy "Users can manage own food entries"
 on public.food_entries for all
@@ -410,3 +465,11 @@ create policy "Users can manage own scanned foods cache"
 on public.scanned_foods_cache for all
 using (auth.uid() = user_id)
 with check (auth.uid() = user_id);
+
+drop policy if exists "Users can manage own daily logging streaks" on public.daily_logging_streaks;
+create policy "Users can manage own daily logging streaks"
+on public.daily_logging_streaks for all
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+notify pgrst, 'reload schema';

@@ -38,12 +38,12 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    padding: 20,
+    padding: 16,
   },
   scrollContent: {
     flexGrow: 1,
-    gap: 16,
-    padding: 20,
-    paddingBottom: 140,
+    gap: 12,
+    padding: 16,
+    paddingBottom: 136,
   },
 });

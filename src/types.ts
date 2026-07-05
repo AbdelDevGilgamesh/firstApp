@@ -27,6 +27,7 @@ export type FoodEntry = {
   baseProtein?: number;
   baseCarbs?: number;
   baseFat?: number;
+  mealLabel?: string;
   source?: string;
   date: string;
   createdAt: string;

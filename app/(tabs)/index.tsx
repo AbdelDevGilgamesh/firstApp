@@ -1,10 +1,12 @@
 import { router } from "expo-router";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   LayoutAnimation,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -20,16 +22,16 @@ import Svg, { Circle } from "react-native-svg";
 import { FoodActionSheet } from "@/src/components/FoodActionSheet";
 import { FoodRow } from "@/src/components/FoodRow";
 import { useCalories } from "@/src/context/CalorieContext";
+import { useLanguage } from "@/src/context/LanguageContext";
 import { useTokens } from "@/src/context/TokenContext";
 import { getDateKey } from "@/src/date";
+import { LoggingStreak } from "@/src/services/streakService";
 import { loadWaterLog, saveWaterLog } from "@/src/storage";
 import { useAppTheme } from "@/src/theme/appTheme";
 import { FoodEntry, WaterLogEntry } from "@/src/types";
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-const PROTEIN_GOAL = 120;
-const CARBS_GOAL = 250;
-const FAT_GOAL = 70;
+const STREAK_BANNER_DISMISSED_DATE_KEY = "streakBanner.dismissedDate";
 
 if (Platform.OS === "android") {
   UIManager.setLayoutAnimationEnabledExperimental?.(true);
@@ -51,6 +53,7 @@ type WaterStats = {
 
 export default function HomeScreen() {
   const theme = useAppTheme();
+  const { t } = useLanguage();
   const { width } = useWindowDimensions();
   const pagerRef = useRef<ScrollView>(null);
   const {
@@ -60,6 +63,8 @@ export default function HomeScreen() {
     getEntriesForDate,
     getTotalForDate,
     isLoading,
+    loggingStreak,
+    macroGoals,
     waterGoalGlasses,
     waterIntakeUnlocked,
   } = useCalories();
@@ -74,6 +79,7 @@ export default function HomeScreen() {
   const [actionEntry, setActionEntry] = useState<FoodEntry | null>(null);
   const [deletedEntry, setDeletedEntry] = useState<FoodEntry | null>(null);
   const [showUndoSnackbar, setShowUndoSnackbar] = useState(false);
+  const [streakBannerVisible, setStreakBannerVisible] = useState(false);
   const [waterEntries, setWaterEntries] = useState<WaterLogEntry[]>([]);
   const undoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waterStats = useMemo(
@@ -83,6 +89,20 @@ export default function HomeScreen() {
 
   useEffect(() => {
     let isMounted = true;
+
+    AsyncStorage.getItem(STREAK_BANNER_DISMISSED_DATE_KEY)
+      .then((dismissedDate) => {
+        if (isMounted) {
+          setStreakBannerVisible(dismissedDate !== today);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load streak banner dismissal state.", error);
+
+        if (isMounted) {
+          setStreakBannerVisible(true);
+        }
+      });
 
     loadWaterLog(today).then((log) => {
       if (isMounted) {
@@ -94,6 +114,16 @@ export default function HomeScreen() {
       isMounted = false;
     };
   }, [today]);
+
+  async function dismissStreakBanner() {
+    setStreakBannerVisible(false);
+
+    try {
+      await AsyncStorage.setItem(STREAK_BANNER_DISMISSED_DATE_KEY, today);
+    } catch (error) {
+      console.warn("Failed to save streak banner dismissal state.", error);
+    }
+  }
 
   useEffect(
     () => () => {
@@ -133,6 +163,7 @@ export default function HomeScreen() {
       baseProtein: entry.baseProtein,
       baseCarbs: entry.baseCarbs,
       baseFat: entry.baseFat,
+      mealLabel: entry.mealLabel,
     };
   }
 
@@ -216,10 +247,27 @@ export default function HomeScreen() {
     >
       <View style={darkStyles.header}>
         <Text style={[darkStyles.headerLabel, { color: theme.text }]}>
-          Today
+          {t("today.title")}
         </Text>
-        <TokenPill isDark={theme.isDark} tokenBalance={tokenBalance} />
+        <View style={darkStyles.headerRight}>
+          {!isLoading && !streakBannerVisible ? (
+            <CompactStreakPill
+              onPress={() => setStreakBannerVisible(true)}
+              streak={loggingStreak}
+            />
+          ) : null}
+          <TokenPill isDark={theme.isDark} tokenBalance={tokenBalance} />
+        </View>
       </View>
+      {isLoading ? (
+        <View style={darkStyles.headerStatsRow}>
+          <StreakBannerSkeleton />
+        </View>
+      ) : streakBannerVisible ? (
+        <View style={darkStyles.headerStatsRow}>
+          <LoggingStreakBanner onDismiss={dismissStreakBanner} streak={loggingStreak} />
+        </View>
+      ) : null}
 
       <ScrollView
         horizontal
@@ -234,14 +282,17 @@ export default function HomeScreen() {
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
         >
-          <View
-            style={[
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => router.push({ pathname: "/daily-nutrition-detail", params: { date: today } })}
+            style={({ pressed }) => [
               darkStyles.mainCard,
               {
                 backgroundColor: theme.card,
                 borderColor: theme.cardBorder,
                 shadowColor: theme.shadow,
               },
+              pressed && darkStyles.quickPressed,
             ]}
           >
             <View style={darkStyles.calorieHeader}>
@@ -265,8 +316,8 @@ export default function HomeScreen() {
                 ]}
               >
                 {remainingCalories >= 0
-                  ? `${remainingCalories} calories remaining`
-                  : `${Math.abs(remainingCalories)} calories over goal`}
+                  ? t("today.caloriesRemaining", { count: remainingCalories })
+                  : t("today.caloriesOver", { count: Math.abs(remainingCalories) })}
               </Text>
             </View>
 
@@ -275,40 +326,40 @@ export default function HomeScreen() {
                 dailyGoal={dailyGoal}
                 isDark={theme.isDark}
                 isOverGoal={remainingCalories < 0}
-                size={144}
+                size={128}
                 totalCalories={totalCalories}
               />
               <View style={darkStyles.macroPanel}>
                 <MacroProgressBar
                   color="#60A5FA"
-                  goal={PROTEIN_GOAL}
+                  goal={macroGoals.protein}
                   label="Protein"
                   value={macros.protein}
                 />
                 <MacroProgressBar
                   color="#34D399"
-                  goal={CARBS_GOAL}
+                  goal={macroGoals.carbs}
                   label="Carbs"
                   value={macros.carbs}
                 />
                 <MacroProgressBar
                   color="#FBBF24"
-                  goal={FAT_GOAL}
+                  goal={macroGoals.fat}
                   label="Fat"
                   value={macros.fat}
                 />
               </View>
             </View>
-          </View>
+          </Pressable>
 
           <View style={darkStyles.summaryGrid}>
-            <DarkSummaryCard label="Eaten" value={`${totalCalories}`} />
+            <DarkSummaryCard label={t("today.eaten")} value={`${totalCalories}`} />
             <DarkSummaryCard
-              label={remainingCalories >= 0 ? "Remaining" : "Over goal"}
+              label={remainingCalories >= 0 ? t("today.remaining") : t("today.overGoal")}
               tone={remainingCalories >= 0 ? "good" : "warning"}
               value={`${Math.abs(remainingCalories)}`}
             />
-            <DarkSummaryCard label="Net calories" value={`${totalCalories}`} />
+            <DarkSummaryCard label={t("today.netCalories")} value={`${totalCalories}`} />
           </View>
 
           <View
@@ -318,7 +369,7 @@ export default function HomeScreen() {
             ]}
           >
             <Text style={[darkStyles.cardLabel, { color: theme.primary }]}>
-              Insight
+              {t("today.insight")}
             </Text>
             <Text style={[darkStyles.tipText, { color: theme.text }]}>
               {tip}
@@ -338,29 +389,29 @@ export default function HomeScreen() {
             ]}
           >
             <Text style={[darkStyles.cardTitle, { color: theme.text }]}>
-              Quick add
+              {t("today.quickAdd")}
             </Text>
             <View style={darkStyles.quickGrid}>
               <QuickAction
-                label="Scan food"
+                label={t("today.scanFood")}
                 onPress={() =>
                   router.push({ pathname: "/add", params: { mode: "scan" } })
                 }
               />
               <QuickAction
-                label="Recent"
+                label={t("today.recent")}
                 onPress={() =>
                   router.push({ pathname: "/add", params: { mode: "find" } })
                 }
               />
               <QuickAction
-                label="Favorites"
+                label={t("today.favorites")}
                 onPress={() =>
                   router.push({ pathname: "/add", params: { mode: "find" } })
                 }
               />
               <QuickAction
-                label="Prepare meal"
+                label={t("today.prepareMeal")}
                 onPress={() =>
                   router.push({ pathname: "/add", params: { mode: "meal" } })
                 }
@@ -384,13 +435,13 @@ export default function HomeScreen() {
 
           {isLoading ? (
             <DarkEmptyState
-              title="Loading foods"
-              message="Your saved entries will appear here."
+              title={t("today.loadingFoods")}
+              message={t("today.savedEntriesAppear")}
             />
           ) : entries.length === 0 ? (
             <DarkEmptyState
-              title="No foods yet"
-              message="Add your first food to start tracking today."
+              title={t("today.noFoodsYet")}
+              message={t("today.addFirstFood")}
             />
           ) : (
             entries.map((entry) => (
@@ -478,6 +529,267 @@ export default function HomeScreen() {
   );
 }
 
+function LoggingStreakBanner({
+  onDismiss,
+  streak,
+}: {
+  onDismiss: () => void;
+  streak: LoggingStreak;
+}) {
+  const theme = useAppTheme();
+  const { t } = useLanguage();
+  const pulse = useRef(new Animated.Value(1)).current;
+  const translateX = useRef(new Animated.Value(0)).current;
+  const opacity = useRef(new Animated.Value(1)).current;
+  const previousKey = useRef(`${streak.currentStreak}-${streak.isActiveToday}-${streak.lastLoggedDate ?? ""}`);
+  const dayLabel = t(streak.currentStreak === 1 ? "today.day" : "today.days");
+  const bestDayLabel = t(streak.longestStreak === 1 ? "today.day" : "today.days");
+  const statusTitle =
+    streak.currentStreak > 0
+      ? t("today.streak", { count: streak.currentStreak, unit: dayLabel })
+      : t("today.startStreak");
+  const subtitle = t("today.best", { count: streak.longestStreak, unit: bestDayLabel });
+  const badgeText = streak.isActiveToday ? t("today.active") : streak.currentStreak > 0 ? t("today.atRisk") : t("today.start");
+  const badgeColor = streak.isActiveToday ? theme.success : streak.isAtRiskToday ? theme.warning : theme.mutedText;
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_event, gesture) =>
+        Math.abs(gesture.dx) > 10 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+      onPanResponderMove: (_event, gesture) => {
+        translateX.setValue(gesture.dx);
+        opacity.setValue(Math.max(0.35, 1 - Math.abs(gesture.dx) / 180));
+      },
+      onPanResponderRelease: (_event, gesture) => {
+        const shouldDismiss = Math.abs(gesture.dx) > 90 || Math.abs(gesture.vx) > 0.8;
+
+        if (shouldDismiss) {
+          Animated.parallel([
+            Animated.timing(translateX, {
+              duration: 180,
+              toValue: gesture.dx >= 0 ? 420 : -420,
+              useNativeDriver: true,
+            }),
+            Animated.timing(opacity, {
+              duration: 180,
+              toValue: 0,
+              useNativeDriver: true,
+            }),
+          ]).start(onDismiss);
+          return;
+        }
+
+        Animated.parallel([
+          Animated.spring(translateX, {
+            friction: 7,
+            tension: 120,
+            toValue: 0,
+            useNativeDriver: true,
+          }),
+          Animated.spring(opacity, {
+            friction: 7,
+            tension: 120,
+            toValue: 1,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      },
+    }),
+  ).current;
+
+  useEffect(() => {
+    const nextKey = `${streak.currentStreak}-${streak.isActiveToday}-${streak.lastLoggedDate ?? ""}`;
+
+    if (previousKey.current === nextKey) {
+      return;
+    }
+
+    previousKey.current = nextKey;
+    Animated.sequence([
+      Animated.spring(pulse, {
+        friction: 5,
+        tension: 160,
+        toValue: 1.06,
+        useNativeDriver: true,
+      }),
+      Animated.spring(pulse, {
+        friction: 7,
+        tension: 140,
+        toValue: 1,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [pulse, streak.currentStreak, streak.isActiveToday, streak.lastLoggedDate]);
+
+  function dismissWithAnimation() {
+    Animated.parallel([
+      Animated.timing(translateX, {
+        duration: 180,
+        toValue: 420,
+        useNativeDriver: true,
+      }),
+      Animated.timing(opacity, {
+        duration: 180,
+        toValue: 0,
+        useNativeDriver: true,
+      }),
+    ]).start(onDismiss);
+  }
+
+  return (
+    <Animated.View
+      {...panResponder.panHandlers}
+      style={[
+        darkStyles.streakCard,
+        {
+          backgroundColor: theme.card,
+          borderColor: streak.isActiveToday
+            ? theme.success
+            : streak.isAtRiskToday
+              ? theme.warning
+              : theme.cardBorder,
+          shadowColor: theme.shadow,
+          opacity,
+          transform: [{ translateX }, { scale: pulse }],
+        },
+      ]}
+    >
+      <View
+        style={[
+          darkStyles.streakIcon,
+          { backgroundColor: theme.isDark ? "#2D1B12" : "#FFF0DA" },
+        ]}
+      >
+        <Text style={darkStyles.streakIconText}>🔥</Text>
+      </View>
+      <View style={darkStyles.streakContent}>
+        <Text style={[darkStyles.streakTitle, { color: theme.text }]}>
+          {statusTitle}
+        </Text>
+        <Text style={[darkStyles.streakSubtitle, { color: theme.mutedText }]}>
+          {subtitle}
+        </Text>
+      </View>
+      <View style={darkStyles.streakActionRow}>
+        <View
+          style={[
+            darkStyles.streakBadge,
+            {
+              backgroundColor: theme.isDark ? `${badgeColor}24` : `${badgeColor}18`,
+              borderColor: `${badgeColor}55`,
+            },
+          ]}
+        >
+          <Text style={[darkStyles.streakBadgeText, { color: badgeColor }]}>
+            {badgeText}
+          </Text>
+        </View>
+        <Pressable
+          accessibilityLabel="Dismiss streak banner"
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={dismissWithAnimation}
+          style={({ pressed }) => [
+            darkStyles.streakDismissButton,
+            { backgroundColor: theme.chipBackground },
+            pressed && darkStyles.quickPressed,
+          ]}
+        >
+          <Text style={[darkStyles.streakDismissText, { color: theme.mutedText }]}>×</Text>
+        </Pressable>
+      </View>
+    </Animated.View>
+  );
+}
+
+function StreakBannerSkeleton() {
+  const theme = useAppTheme();
+  const shimmer = useRef(new Animated.Value(0.55)).current;
+
+  useEffect(() => {
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(shimmer, {
+          duration: 850,
+          toValue: 1,
+          useNativeDriver: true,
+        }),
+        Animated.timing(shimmer, {
+          duration: 850,
+          toValue: 0.55,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    animation.start();
+
+    return () => {
+      animation.stop();
+    };
+  }, [shimmer]);
+
+  return (
+    <Animated.View
+      style={[
+        darkStyles.streakSkeletonCard,
+        {
+          backgroundColor: theme.card,
+          borderColor: theme.cardBorder,
+          opacity: shimmer,
+          shadowColor: theme.shadow,
+        },
+      ]}
+    >
+      <View style={[darkStyles.streakSkeletonIcon, { backgroundColor: theme.chipBackground }]} />
+      <View style={darkStyles.streakSkeletonTextGroup}>
+        <View style={[darkStyles.streakSkeletonLine, { backgroundColor: theme.chipBackground, width: "62%" }]} />
+        <View style={[darkStyles.streakSkeletonLineSmall, { backgroundColor: theme.chipBackground, width: "42%" }]} />
+      </View>
+      <View style={darkStyles.streakSkeletonActions}>
+        <View style={[darkStyles.streakSkeletonPill, { backgroundColor: theme.chipBackground }]} />
+        <View style={[darkStyles.streakSkeletonClose, { backgroundColor: theme.chipBackground }]} />
+      </View>
+    </Animated.View>
+  );
+}
+
+function CompactStreakPill({
+  onPress,
+  streak,
+}: {
+  onPress: () => void;
+  streak: LoggingStreak;
+}) {
+  const theme = useAppTheme();
+  const shouldHide = streak.currentStreak === 0 && !streak.isAtRiskToday && !streak.isActiveToday;
+  const color = streak.isActiveToday ? theme.success : streak.isAtRiskToday ? theme.warning : theme.mutedText;
+
+  if (shouldHide) {
+    return null;
+  }
+
+  return (
+    <Pressable
+      accessibilityLabel="Show streak details"
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [
+        darkStyles.compactStreakPill,
+        {
+          backgroundColor: theme.chipBackground,
+          borderColor: streak.isActiveToday || streak.isAtRiskToday ? color : theme.cardBorder,
+        },
+        pressed && darkStyles.quickPressed,
+      ]}
+    >
+      <Text style={darkStyles.compactStreakIcon}>🔥</Text>
+      <Text style={[darkStyles.compactStreakText, { color }]}>
+        {streak.currentStreak}
+      </Text>
+    </Pressable>
+  );
+}
+
 function TokenPill({
   isDark = false,
   tokenBalance,
@@ -485,10 +797,36 @@ function TokenPill({
   isDark?: boolean;
   tokenBalance: number;
 }) {
+  const { t } = useLanguage();
+  const pulse = useRef(new Animated.Value(1)).current;
+  const previousBalance = useRef(tokenBalance);
+
+  useEffect(() => {
+    if (previousBalance.current === tokenBalance) {
+      return;
+    }
+
+    previousBalance.current = tokenBalance;
+    Animated.sequence([
+      Animated.spring(pulse, {
+        friction: 5,
+        tension: 180,
+        toValue: 1.08,
+        useNativeDriver: true,
+      }),
+      Animated.spring(pulse, {
+        friction: 6,
+        tension: 160,
+        toValue: 1,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [pulse, tokenBalance]);
+
   return (
-    <View style={[styles.tokenBar, isDark && darkStyles.tokenBar]}>
+    <Animated.View style={[styles.tokenBar, isDark && darkStyles.tokenBar, { transform: [{ scale: pulse }] }]}>
       <Text style={[styles.tokenText, isDark && darkStyles.tokenText]}>
-        {tokenBalance} tokens
+        {t("today.tokens", { count: tokenBalance })}
       </Text>
       <Pressable
         accessibilityLabel="Get more tokens"
@@ -501,7 +839,7 @@ function TokenPill({
       >
         <Text style={styles.tokenButtonText}>+</Text>
       </Pressable>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -584,7 +922,20 @@ function MacroProgressBar({
   value: number;
 }) {
   const theme = useAppTheme();
-  const progressPercent = `${Math.min((value / goal) * 100, 100)}%` as const;
+  const animatedProgress = useRef(new Animated.Value(0)).current;
+  const progress = goal > 0 ? Math.min(value / goal, 1) : 0;
+  const progressWidth = animatedProgress.interpolate({
+    inputRange: [0, 1],
+    outputRange: ["0%", "100%"],
+  });
+
+  useEffect(() => {
+    Animated.timing(animatedProgress, {
+      duration: 420,
+      toValue: progress,
+      useNativeDriver: false,
+    }).start();
+  }, [animatedProgress, progress]);
 
   return (
     <View style={darkStyles.macroRow}>
@@ -602,10 +953,10 @@ function MacroProgressBar({
           { backgroundColor: theme.isDark ? "#243047" : "#E5E7EB" },
         ]}
       >
-        <View
+        <Animated.View
           style={[
             darkStyles.macroFill,
-            { backgroundColor: color, width: progressPercent },
+            { backgroundColor: color, width: progressWidth },
           ]}
         />
       </View>
@@ -658,6 +1009,7 @@ function WaterPreview({
   stats: WaterStats;
 }) {
   const theme = useAppTheme();
+  const { t } = useLanguage();
 
   if (!isUnlocked) {
     return (
@@ -669,10 +1021,10 @@ function WaterPreview({
       >
         <View style={darkStyles.waterPreviewTextGroup}>
           <Text style={[darkStyles.cardTitle, { color: theme.text }]}>
-            Water intake
+            {t("today.waterIntake")}
           </Text>
           <Text style={[darkStyles.waterText, { color: theme.mutedText }]}>
-            Unlock hydration tracking
+            {t("today.unlockHydration")}
           </Text>
         </View>
         <Pressable
@@ -686,7 +1038,7 @@ function WaterPreview({
             pressed && darkStyles.quickPressed,
           ]}
         >
-          <Text style={darkStyles.previewActionText}>Unlock</Text>
+          <Text style={darkStyles.previewActionText}>{t("today.unlock")}</Text>
         </Pressable>
       </View>
     );
@@ -704,7 +1056,7 @@ function WaterPreview({
     >
       <View style={darkStyles.waterPreviewTextGroup}>
         <Text style={[darkStyles.cardTitle, { color: theme.text }]}>
-          Water intake
+          {t("today.waterIntake")}
         </Text>
         <Text style={[darkStyles.waterPreviewAmount, { color: theme.text }]}>
           {Math.round(stats.totalMl)} / {stats.goalMl} ml
@@ -715,7 +1067,7 @@ function WaterPreview({
       </View>
       <View style={darkStyles.previewChevronGroup}>
         <Text style={[darkStyles.swipeHint, { color: theme.mutedText }]}>
-          Swipe left to view
+          {t("today.swipeLeftToView")}
         </Text>
         <Text style={[darkStyles.previewChevron, { color: theme.primary }]}>
           ›
@@ -741,6 +1093,7 @@ function WaterTracker({
   stats: WaterStats;
 }) {
   const theme = useAppTheme();
+  const { t } = useLanguage();
   const [unit, setUnit] = useState<"ml" | "fl oz" | "glasses">("ml");
   const hydrationTip = getHydrationTip(stats.progress);
 
@@ -754,15 +1107,14 @@ function WaterTracker({
       >
         <View style={darkStyles.cardHeaderRow}>
           <Text style={[darkStyles.cardTitle, { color: theme.text }]}>
-            Water intake
+            {t("today.waterIntake")}
           </Text>
           <Text style={[darkStyles.waterText, { color: theme.warning }]}>
-            Locked
+            {t("today.locked")}
           </Text>
         </View>
         <Text style={[darkStyles.emptyMessage, { color: theme.mutedText }]}>
-          Unlock hydration tracking in Goals to log water, see progress, and
-          build a daily habit.
+          {t("today.unlockWaterDescription")}
         </Text>
         <Pressable
           accessibilityRole="button"
@@ -775,7 +1127,7 @@ function WaterTracker({
             pressed && darkStyles.quickPressed,
           ]}
         >
-          <Text style={darkStyles.unlockButtonText}>Unlock</Text>
+          <Text style={darkStyles.unlockButtonText}>{t("today.unlock")}</Text>
         </Pressable>
       </View>
     );
@@ -790,10 +1142,10 @@ function WaterTracker({
     >
       <View style={darkStyles.cardHeaderRow}>
         <Text style={[darkStyles.cardTitle, { color: theme.text }]}>
-          Water intake
+          {t("today.waterIntake")}
         </Text>
         <Text style={[darkStyles.waterText, { color: theme.mutedText }]}>
-          Goal {goal} glasses
+          {t("today.goalGlasses", { count: goal })}
         </Text>
       </View>
       <View style={darkStyles.hydrationSummary}>
@@ -1050,19 +1402,19 @@ function getNutritionTip(
     return "You are over your calorie goal.";
   }
 
-  if (macros.protein >= PROTEIN_GOAL) {
+  if (macros.protein >= 120) {
     return "Great protein day!";
   }
 
-  if (macros.protein < PROTEIN_GOAL * 0.35) {
+  if (macros.protein < 120 * 0.35) {
     return "Add more protein today.";
   }
 
-  if (macros.fat < FAT_GOAL * 0.2) {
+  if (macros.fat < 70 * 0.2) {
     return "Low fat intake today.";
   }
 
-  if (macros.carbs < CARBS_GOAL * 0.25) {
+  if (macros.carbs < 250 * 0.25) {
     return "Add more carbs if you need energy.";
   }
 
@@ -1088,22 +1440,32 @@ const darkStyles = StyleSheet.create({
   },
   content: {
     flexGrow: 1,
-    gap: 16,
-    padding: 18,
+    gap: 12,
+    padding: 16,
     paddingBottom: 140,
   },
   pager: {
     flex: 1,
   },
   header: {
-    minHeight: 44,
+    minHeight: 38,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
-    paddingHorizontal: 18,
+    paddingHorizontal: 16,
     paddingTop: 4,
-    paddingBottom: 10,
+    paddingBottom: 6,
+  },
+  headerRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
+  headerStatsRow: {
+    paddingHorizontal: 16,
+    paddingBottom: 8,
   },
   pageDots: {
     position: "absolute",
@@ -1170,12 +1532,12 @@ const darkStyles = StyleSheet.create({
   },
   mainCard: {
     ...cardShadow,
-    gap: 18,
+    gap: 14,
     borderWidth: 1,
     borderColor: "#1F2A44",
-    borderRadius: 18,
+    borderRadius: 16,
     backgroundColor: "#101827",
-    padding: 18,
+    padding: 15,
   },
   calorieHeader: {
     gap: 4,
@@ -1187,18 +1549,18 @@ const darkStyles = StyleSheet.create({
   },
   bigCalories: {
     color: "#F8FAFC",
-    fontSize: 54,
+    fontSize: 46,
     fontWeight: "900",
   },
   goalSlash: {
-    marginBottom: 8,
+    marginBottom: 6,
     color: "#94A3B8",
-    fontSize: 22,
+    fontSize: 19,
     fontWeight: "900",
   },
   remainingText: {
     color: "#86EFAC",
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "800",
   },
   overText: {
@@ -1207,7 +1569,7 @@ const darkStyles = StyleSheet.create({
   ringAndMacros: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 16,
+    gap: 12,
   },
   ringCalories: {
     color: "#F8FAFC",
@@ -1218,10 +1580,10 @@ const darkStyles = StyleSheet.create({
   },
   macroPanel: {
     flex: 1,
-    gap: 12,
+    gap: 10,
   },
   macroRow: {
-    gap: 7,
+    gap: 6,
   },
   macroHeader: {
     flexDirection: "row",
@@ -1240,7 +1602,7 @@ const darkStyles = StyleSheet.create({
     fontWeight: "800",
   },
   macroTrack: {
-    height: 8,
+    height: 7,
     overflow: "hidden",
     borderRadius: 8,
     backgroundColor: "#243047",
@@ -1251,16 +1613,16 @@ const darkStyles = StyleSheet.create({
   },
   summaryGrid: {
     flexDirection: "row",
-    gap: 10,
+    gap: 8,
   },
   summaryCard: {
     flex: 1,
-    gap: 6,
+    gap: 4,
     borderWidth: 1,
     borderColor: "#1F2A44",
-    borderRadius: 14,
+    borderRadius: 13,
     backgroundColor: "#111827",
-    padding: 12,
+    padding: 10,
   },
   summaryLabel: {
     color: "#94A3B8",
@@ -1269,7 +1631,7 @@ const darkStyles = StyleSheet.create({
   },
   summaryValue: {
     color: "#F8FAFC",
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "900",
   },
   summaryGood: {
@@ -1278,13 +1640,136 @@ const darkStyles = StyleSheet.create({
   summaryWarning: {
     color: "#FDBA74",
   },
-  tipCard: {
+  streakCard: {
+    ...cardShadow,
+    minHeight: 50,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  streakIcon: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 12,
+  },
+  streakIconText: {
+    fontSize: 17,
+  },
+  streakContent: {
+    flex: 1,
+    gap: 2,
+  },
+  streakActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
     gap: 8,
+  },
+  streakTitle: {
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  streakSubtitle: {
+    fontSize: 11,
+    fontWeight: "800",
+    lineHeight: 14,
+  },
+  streakBadge: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  streakBadgeText: {
+    fontSize: 10,
+    fontWeight: "900",
+  },
+  streakDismissButton: {
+    width: 30,
+    height: 30,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 15,
+  },
+  streakDismissText: {
+    fontSize: 20,
+    fontWeight: "900",
+    lineHeight: 22,
+  },
+  streakSkeletonCard: {
+    ...cardShadow,
+    minHeight: 50,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  streakSkeletonIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+  },
+  streakSkeletonTextGroup: {
+    flex: 1,
+    gap: 7,
+  },
+  streakSkeletonLine: {
+    height: 12,
+    borderRadius: 999,
+  },
+  streakSkeletonLineSmall: {
+    height: 9,
+    borderRadius: 999,
+  },
+  streakSkeletonActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  streakSkeletonPill: {
+    width: 58,
+    height: 25,
+    borderRadius: 999,
+  },
+  streakSkeletonClose: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+  },
+  compactStreakPill: {
+    minHeight: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+  },
+  compactStreakIcon: {
+    fontSize: 14,
+    lineHeight: 16,
+  },
+  compactStreakText: {
+    fontSize: 13,
+    fontWeight: "900",
+    lineHeight: 16,
+  },
+  tipCard: {
+    gap: 6,
     borderWidth: 1,
     borderColor: "#1F2A44",
-    borderRadius: 16,
+    borderRadius: 14,
     backgroundColor: "#101827",
-    padding: 16,
+    padding: 13,
   },
   cardLabel: {
     color: "#38BDF8",
@@ -1294,9 +1779,9 @@ const darkStyles = StyleSheet.create({
   },
   tipText: {
     color: "#E2E8F0",
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "800",
-    lineHeight: 22,
+    lineHeight: 20,
   },
   waterCard: {
     gap: 14,

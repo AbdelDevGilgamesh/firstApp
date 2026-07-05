@@ -16,13 +16,24 @@ import {
 } from '@/src/services/customFoodsDbService';
 import { create as createMeal } from '@/src/services/mealsDbService';
 import {
+  LoggingStreak,
+  calculateLoggingStreak,
+  loadLoggingStreak,
+  loadLoggingStreakFromSupabase,
+  refreshLoggingStreak as refreshLoggingStreakService,
+  saveLoggingStreak,
+  syncLoggingStreakToSupabase,
+} from '@/src/services/streakService';
+import {
   DEFAULT_DAILY_GOAL,
   DEFAULT_TODAY_DASHBOARD_STYLE,
   DEFAULT_WATER_GOAL_GLASSES,
+  DEFAULT_MACRO_GOALS,
   loadDailyGoal,
   loadFoodUsageCounts,
   loadFoodEntries,
   loadFoodTemplates,
+  loadMacroGoals,
   loadMealTemplates,
   loadPinnedFoodKeys,
   loadTodayDashboardStyle,
@@ -32,6 +43,7 @@ import {
   saveFoodEntries,
   saveFoodTemplates,
   saveFoodUsageCounts,
+  saveMacroGoals,
   saveMealTemplates,
   savePinnedFoodKeys,
   saveTodayDashboardStyle,
@@ -65,6 +77,7 @@ type FoodDetailsInput = {
   baseProtein?: number;
   baseCarbs?: number;
   baseFat?: number;
+  mealLabel?: string;
   source?: string;
 };
 
@@ -106,9 +119,11 @@ type CalorieContextValue = {
   foodUsageCounts: Record<string, number>;
   pinnedFoodKeys: string[];
   dailyGoal: number;
+  macroGoals: typeof DEFAULT_MACRO_GOALS;
   todayDashboardStyle: TodayDashboardStyle;
   waterGoalGlasses: number;
   waterIntakeUnlocked: boolean;
+  loggingStreak: LoggingStreak;
   isLoading: boolean;
   addFood: (input: AddFoodInput) => Promise<void>;
   updateFood: (id: string, input: UpdateFoodInput) => Promise<void>;
@@ -118,9 +133,11 @@ type CalorieContextValue = {
   addMealTemplate: (input: AddMealTemplateInput) => Promise<MealTemplate>;
   togglePinnedFood: (foodKey: string) => Promise<void>;
   updateDailyGoal: (goal: number) => Promise<void>;
+  updateMacroGoals: (goals: typeof DEFAULT_MACRO_GOALS) => Promise<void>;
   updateTodayDashboardStyle: (style: TodayDashboardStyle) => Promise<void>;
   updateWaterGoalGlasses: (goal: number) => Promise<void>;
   updateWaterIntakeUnlocked: (isUnlocked: boolean) => Promise<void>;
+  refreshLoggingStreak: () => Promise<LoggingStreak>;
   getEntriesForDate: (date: string) => FoodEntry[];
   getTotalForDate: (date: string) => number;
   daySummaries: DaySummary[];
@@ -129,6 +146,14 @@ type CalorieContextValue = {
 const CalorieContext = createContext<CalorieContextValue | undefined>(undefined);
 const TEST_PROFILE_ID_KEY = 'testProfileId';
 const LEGACY_TEST_PROFILE_ID_KEY = 'calorie-tracker.test-profile-id';
+const DEFAULT_LOGGING_STREAK: LoggingStreak = {
+  currentStreak: 0,
+  longestStreak: 0,
+  lastLoggedDate: null,
+  isActiveToday: false,
+  isAtRiskToday: false,
+  updatedAt: new Date(0).toISOString(),
+};
 
 async function loadTestProfileId() {
   try {
@@ -200,6 +225,8 @@ function getRemoteId(item?: { id?: string; supabaseId?: string }) {
 
 function mapDbFoodEntry(row: FoodEntryRow): FoodEntry {
   const createdAt = row.created_at;
+  const legacyMealType = 'meal_type' in row ? row.meal_type : undefined;
+  const mealLabel = row.meal_label ?? legacyMealType ?? undefined;
 
   return {
     id: row.id,
@@ -220,6 +247,7 @@ function mapDbFoodEntry(row: FoodEntryRow): FoodEntry {
     baseProtein: row.base_protein ?? undefined,
     baseCarbs: row.base_carbs ?? undefined,
     baseFat: row.base_fat ?? undefined,
+    mealLabel,
     source: row.source ?? undefined,
     date: row.entry_date ?? createdAt.slice(0, 10),
     createdAt,
@@ -328,6 +356,7 @@ function mapFoodEntryToDbInsert(entry: FoodEntry, userId: string) {
     base_protein: Number(entry.baseProtein ?? entry.protein ?? 0),
     base_carbs: Number(entry.baseCarbs ?? entry.carbs ?? 0),
     base_fat: Number(entry.baseFat ?? entry.fat ?? 0),
+    meal_label: entry.mealLabel?.trim() || null,
     entry_date: entryDate,
     created_at: entry.createdAt,
   };
@@ -352,6 +381,7 @@ function mapFoodDetailsToDbUpdate(input: UpdateFoodInput) {
     base_protein: Number(input.baseProtein ?? input.protein ?? 0),
     base_carbs: Number(input.baseCarbs ?? input.carbs ?? 0),
     base_fat: Number(input.baseFat ?? input.fat ?? 0),
+    meal_label: input.mealLabel?.trim() || null,
   };
 }
 
@@ -362,11 +392,13 @@ export function CalorieProvider({ children }: PropsWithChildren) {
   const [foodUsageCounts, setFoodUsageCounts] = useState<Record<string, number>>({});
   const [pinnedFoodKeys, setPinnedFoodKeys] = useState<string[]>([]);
   const [dailyGoal, setDailyGoal] = useState(DEFAULT_DAILY_GOAL);
+  const [macroGoals, setMacroGoals] = useState(DEFAULT_MACRO_GOALS);
   const [todayDashboardStyle, setTodayDashboardStyle] = useState<TodayDashboardStyle>(
     DEFAULT_TODAY_DASHBOARD_STYLE,
   );
   const [waterIntakeUnlocked, setWaterIntakeUnlocked] = useState(false);
   const [waterGoalGlasses, setWaterGoalGlasses] = useState(DEFAULT_WATER_GOAL_GLASSES);
+  const [loggingStreak, setLoggingStreak] = useState<LoggingStreak>(DEFAULT_LOGGING_STREAK);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -384,6 +416,8 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           storedDashboardStyle,
           storedWaterUnlocked,
           storedWaterGoal,
+          storedLoggingStreak,
+          storedMacroGoals,
         ] =
           await Promise.all([
           loadFoodEntries(),
@@ -395,11 +429,15 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           loadTodayDashboardStyle(),
           loadWaterIntakeUnlocked(),
           loadWaterGoalGlasses(),
+          loadLoggingStreak(),
+          loadMacroGoals(),
         ]);
 
         if (isMounted) {
+          const recalculatedStreak = calculateLoggingStreak(storedEntries);
           setEntries(storedEntries);
           setDailyGoal(storedGoal);
+          setMacroGoals(storedMacroGoals);
           setFoodTemplates(storedTemplates);
           setMealTemplates(storedMealTemplates);
           setPinnedFoodKeys(storedPinnedKeys);
@@ -407,21 +445,41 @@ export function CalorieProvider({ children }: PropsWithChildren) {
           setTodayDashboardStyle(storedDashboardStyle);
           setWaterIntakeUnlocked(storedWaterUnlocked);
           setWaterGoalGlasses(storedWaterGoal);
+          setLoggingStreak({
+            ...recalculatedStreak,
+            longestStreak: Math.max(recalculatedStreak.longestStreak, storedLoggingStreak.longestStreak),
+          });
           setIsLoading(false);
         }
 
         const testProfileId = await loadTestProfileId();
 
         if (!testProfileId) {
+          await saveLoggingStreak(calculateLoggingStreak(storedEntries));
           return;
+        }
+
+        const remoteStreak = await loadLoggingStreakFromSupabase(testProfileId);
+
+        if (
+          remoteStreak &&
+          new Date(remoteStreak.updatedAt).getTime() > new Date(storedLoggingStreak.updatedAt).getTime() &&
+          isMounted
+        ) {
+          setLoggingStreak(remoteStreak);
+          await saveLoggingStreak(remoteStreak);
         }
 
         const dbEntries = await listFoodEntriesByUserId(testProfileId);
 
         if (dbEntries !== null && isMounted) {
           const syncedEntries = dbEntries.map(mapDbFoodEntry);
+          const syncedStreak = calculateLoggingStreak(syncedEntries);
           setEntries(syncedEntries);
+          setLoggingStreak(syncedStreak);
           await saveFoodEntries(syncedEntries);
+          await saveLoggingStreak(syncedStreak);
+          await syncLoggingStreakToSupabase(syncedStreak, testProfileId);
         }
 
         const dbCustomFoods = await listCustomFoodsByUserId(testProfileId);
@@ -466,6 +524,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       baseProtein: input.baseProtein,
       baseCarbs: input.baseCarbs,
       baseFat: input.baseFat,
+      mealLabel: input.mealLabel?.trim() || undefined,
       source: getEntrySource(input),
       date: getDateKey(now),
       createdAt: now.toISOString(),
@@ -474,12 +533,12 @@ export function CalorieProvider({ children }: PropsWithChildren) {
 
     setEntries(nextEntries);
     await saveFoodEntries(nextEntries);
+    const testProfileId = await loadTestProfileId();
+    setLoggingStreak(await refreshLoggingStreakService(nextEntries, testProfileId));
 
     if (input.foodKey) {
       await incrementFoodUsage(input.foodKey);
     }
-
-    const testProfileId = await loadTestProfileId();
 
     if (!testProfileId) {
       return;
@@ -512,6 +571,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
 
     setEntries(syncedEntries);
     await saveFoodEntries(syncedEntries);
+    setLoggingStreak(await refreshLoggingStreakService(syncedEntries, testProfileId));
   }
 
   async function addFoodTemplate(input: AddTemplateInput) {
@@ -733,6 +793,7 @@ export function CalorieProvider({ children }: PropsWithChildren) {
             baseProtein: input.baseProtein,
             baseCarbs: input.baseCarbs,
             baseFat: input.baseFat,
+            mealLabel: input.mealLabel?.trim() || undefined,
             source: getEntrySource(input),
           }
         : entry,
@@ -740,6 +801,8 @@ export function CalorieProvider({ children }: PropsWithChildren) {
 
     setEntries(nextEntries);
     await saveFoodEntries(nextEntries);
+    const testProfileId = await loadTestProfileId();
+    setLoggingStreak(await refreshLoggingStreakService(nextEntries, testProfileId));
 
     if (input.foodKey) {
       await incrementFoodUsage(input.foodKey);
@@ -754,8 +817,6 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       const updatePayload = mapFoodDetailsToDbUpdate(input);
       dbEntry = await updateFoodEntry(remoteId, updatePayload);
     } else if (updatedLocalEntry) {
-      const testProfileId = await loadTestProfileId();
-
       if (testProfileId) {
         const payload = mapFoodEntryToDbInsert(updatedLocalEntry, testProfileId);
         const result = await createFoodEntry(payload);
@@ -774,6 +835,8 @@ export function CalorieProvider({ children }: PropsWithChildren) {
 
     setEntries(syncedEntries);
     await saveFoodEntries(syncedEntries);
+    const syncedProfileId = await loadTestProfileId();
+    setLoggingStreak(await refreshLoggingStreakService(syncedEntries, syncedProfileId));
   }
 
   async function deleteFood(id: string) {
@@ -782,6 +845,8 @@ export function CalorieProvider({ children }: PropsWithChildren) {
 
     setEntries(nextEntries);
     await saveFoodEntries(nextEntries);
+    const testProfileId = await loadTestProfileId();
+    setLoggingStreak(await refreshLoggingStreakService(nextEntries, testProfileId));
 
     const remoteId = getRemoteId(targetEntry);
 
@@ -796,6 +861,17 @@ export function CalorieProvider({ children }: PropsWithChildren) {
   async function updateDailyGoal(goal: number) {
     setDailyGoal(goal);
     await saveDailyGoal(goal);
+  }
+
+  async function updateMacroGoals(goals: typeof DEFAULT_MACRO_GOALS) {
+    const nextGoals = {
+      protein: Math.max(0, Math.round(goals.protein)),
+      carbs: Math.max(0, Math.round(goals.carbs)),
+      fat: Math.max(0, Math.round(goals.fat)),
+    };
+
+    setMacroGoals(nextGoals);
+    await saveMacroGoals(nextGoals);
   }
 
   async function updateTodayDashboardStyle(style: TodayDashboardStyle) {
@@ -821,6 +897,15 @@ export function CalorieProvider({ children }: PropsWithChildren) {
 
   function getTotalForDate(date: string) {
     return getEntriesForDate(date).reduce((total, entry) => total + entry.calories, 0);
+  }
+
+  async function refreshLoggingStreak() {
+    const testProfileId = await loadTestProfileId();
+    const nextStreak = await refreshLoggingStreakService(entries, testProfileId);
+
+    setLoggingStreak(nextStreak);
+
+    return nextStreak;
   }
 
   const daySummaries = useMemo(() => {
@@ -850,9 +935,11 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       foodUsageCounts,
       pinnedFoodKeys,
       dailyGoal,
+      macroGoals,
       todayDashboardStyle,
       waterGoalGlasses,
       waterIntakeUnlocked,
+      loggingStreak,
       isLoading,
       addFood,
       updateFood,
@@ -862,20 +949,24 @@ export function CalorieProvider({ children }: PropsWithChildren) {
       addMealTemplate,
       togglePinnedFood,
       updateDailyGoal,
+      updateMacroGoals,
       updateTodayDashboardStyle,
       updateWaterGoalGlasses,
       updateWaterIntakeUnlocked,
+      refreshLoggingStreak,
       getEntriesForDate,
       getTotalForDate,
       daySummaries,
     }),
     [
       dailyGoal,
+      macroGoals,
       daySummaries,
       entries,
       foodTemplates,
       foodUsageCounts,
       isLoading,
+      loggingStreak,
       mealTemplates,
       pinnedFoodKeys,
       todayDashboardStyle,

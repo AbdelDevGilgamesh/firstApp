@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import {
   Animated,
   PanResponder,
@@ -8,6 +8,7 @@ import {
   View,
 } from "react-native";
 
+import { PressableScale } from "@/src/components/PressableScale";
 import { FoodEntry } from "@/src/types";
 
 type FoodRowProps = {
@@ -88,6 +89,7 @@ export function FoodRow({
   const canSwipeDelete = deleteMode === "swipe" && Boolean(onDelete);
   const canShowActions = deleteMode === "actions" && Boolean(onOpenActions);
   const translateX = useRef(new Animated.Value(0)).current;
+  const entrance = useRef(new Animated.Value(0)).current;
   const isOpen = useRef(false);
   const quantityLabel =
     entry.quantity ??
@@ -130,6 +132,19 @@ export function FoodRow({
     }),
   ).current;
 
+  useEffect(() => {
+    Animated.timing(entrance, {
+      duration: 220,
+      toValue: 1,
+      useNativeDriver: true,
+    }).start();
+  }, [entrance]);
+
+  const entranceTranslateY = entrance.interpolate({
+    inputRange: [0, 1],
+    outputRange: [10, 0],
+  });
+
   function closeSwipe() {
     isOpen.current = false;
     Animated.spring(translateX, {
@@ -146,7 +161,14 @@ export function FoodRow({
   }
 
   return (
-    <View style={styles.swipeContainer}>
+    <Animated.View
+      style={[
+        styles.swipeContainer,
+        {
+          opacity: entrance,
+          transform: [{ translateY: entranceTranslateY }],
+        },
+      ]}>
       {canSwipeDelete ? (
         <Pressable
           accessibilityRole="button"
@@ -167,7 +189,7 @@ export function FoodRow({
         ]}
         {...(canSwipeDelete ? panResponder.panHandlers : {})}
       >
-        <Pressable
+        <PressableScale
           accessibilityRole="button"
           disabled={!onEdit}
           delayLongPress={260}
@@ -177,10 +199,7 @@ export function FoodRow({
             }
           }}
           onPress={() => onEdit?.(entry)}
-          style={({ pressed }) => [
-            styles.rowPressable,
-            pressed && onEdit ? styles.rowPressed : null,
-          ]}
+          style={styles.rowPressable}
         >
           <View style={[styles.avatar, isDark && styles.avatarDark]}>
             <Text style={styles.avatarText}>{getFoodAvatar(entry.name)}</Text>
@@ -233,9 +252,9 @@ export function FoodRow({
               cal
             </Text>
           </View>
-        </Pressable>
+        </PressableScale>
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 }
 

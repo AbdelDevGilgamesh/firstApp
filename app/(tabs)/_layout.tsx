@@ -3,6 +3,7 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { Tabs } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useLanguage } from '@/src/context/LanguageContext';
 import { useAppTheme } from '@/src/theme/appTheme';
 
 // You can explore the built-in icon families and icons on the web at https://icons.expo.fyi/
@@ -16,6 +17,7 @@ function TabBarIcon(props: {
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const theme = useAppTheme();
+  const { t } = useLanguage();
   const bottomInset = Math.max(insets.bottom, 12);
 
   return (
@@ -43,28 +45,28 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Today',
+          title: t('tabs.today'),
           tabBarIcon: ({ color }) => <TabBarIcon name="home" color={color} />,
         }}
       />
       <Tabs.Screen
         name="add"
         options={{
-          title: 'Add',
+          title: t('tabs.add'),
           tabBarIcon: ({ color }) => <TabBarIcon name="plus-circle" color={color} />,
         }}
       />
       <Tabs.Screen
         name="history"
         options={{
-          title: 'History',
+          title: t('tabs.history'),
           tabBarIcon: ({ color }) => <TabBarIcon name="calendar" color={color} />,
         }}
       />
       <Tabs.Screen
         name="settings"
         options={{
-          title: 'Settings',
+          title: t('tabs.settings'),
           tabBarIcon: ({ color }) => <TabBarIcon name="sliders" color={color} />,
         }}
       />

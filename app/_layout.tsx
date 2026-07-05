@@ -8,7 +8,9 @@ import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { CalorieProvider } from '@/src/context/CalorieContext';
+import { LanguageProvider } from '@/src/context/LanguageContext';
 import { TokenProvider } from '@/src/context/TokenContext';
+import { ToastProvider } from '@/src/context/ToastContext';
 
 export {
   // Catch any errors thrown by the Layout component.
@@ -52,14 +54,19 @@ function RootLayoutNav() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <TokenProvider>
-        <CalorieProvider>
-          <Stack>
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
-          </Stack>
-        </CalorieProvider>
-      </TokenProvider>
+      <LanguageProvider>
+        <TokenProvider>
+          <CalorieProvider>
+            <ToastProvider>
+              <Stack>
+                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                <Stack.Screen name="daily-nutrition-detail" options={{ headerShown: false }} />
+                <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+              </Stack>
+            </ToastProvider>
+          </CalorieProvider>
+        </TokenProvider>
+      </LanguageProvider>
     </ThemeProvider>
   );
 }

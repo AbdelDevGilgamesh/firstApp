@@ -26,7 +26,14 @@ export type TokenTransaction = {
   createdAt: string;
 };
 
-type SpendReason = 'scan_food' | 'add_meal' | 'unlock_water_intake' | 'meal_photo_estimate';
+type SpendReason =
+  | 'scan_food'
+  | 'add_meal'
+  | 'unlock_water_intake'
+  | 'meal_photo_estimate'
+  | 'ai_meal_autofill'
+  | 'ai_food_autofill'
+  | 'internet_product_lookup';
 
 type TokenContextValue = {
   addTokens: (amount: number) => Promise<void>;

@@ -9,17 +9,53 @@ export type Database = {
         Row: {
           id: string;
           display_name: string | null;
+          nutrition_goal: string | null;
+          nutrition_style: string | null;
+          age: number | null;
+          sex: string | null;
+          height_cm: number | null;
+          weight_kg: number | null;
+          activity_level: string | null;
+          target_calories: number | null;
+          target_protein: number | null;
+          target_carbs: number | null;
+          target_fat: number | null;
+          nutrition_profile_updated_at: string | null;
           created_at: string;
           updated_at: string;
         };
         Insert: {
           id?: string;
           display_name?: string | null;
+          nutrition_goal?: string | null;
+          nutrition_style?: string | null;
+          age?: number | null;
+          sex?: string | null;
+          height_cm?: number | null;
+          weight_kg?: number | null;
+          activity_level?: string | null;
+          target_calories?: number | null;
+          target_protein?: number | null;
+          target_carbs?: number | null;
+          target_fat?: number | null;
+          nutrition_profile_updated_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
           display_name?: string | null;
+          nutrition_goal?: string | null;
+          nutrition_style?: string | null;
+          age?: number | null;
+          sex?: string | null;
+          height_cm?: number | null;
+          weight_kg?: number | null;
+          activity_level?: string | null;
+          target_calories?: number | null;
+          target_protein?: number | null;
+          target_carbs?: number | null;
+          target_fat?: number | null;
+          nutrition_profile_updated_at?: string | null;
           updated_at?: string;
         };
         Relationships: [];
@@ -93,6 +129,8 @@ export type Database = {
           base_protein: number | null;
           base_carbs: number | null;
           base_fat: number | null;
+          meal_label: string | null;
+          meal_type?: string | null;
           entry_date: string;
           created_at: string;
           updated_at: string;
@@ -115,6 +153,7 @@ export type Database = {
           base_protein?: number | null;
           base_carbs?: number | null;
           base_fat?: number | null;
+          meal_label?: string | null;
           entry_date: string;
           created_at?: string;
           updated_at?: string;
@@ -135,6 +174,7 @@ export type Database = {
           base_protein?: number | null;
           base_carbs?: number | null;
           base_fat?: number | null;
+          meal_label?: string | null;
           entry_date?: string;
           updated_at?: string;
         };
@@ -375,6 +415,31 @@ export type Database = {
           keywords?: string[];
           serving_presets?: Json | null;
           source?: 'barcode';
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      daily_logging_streaks: {
+        Row: {
+          id: string;
+          user_id: string;
+          current_streak: number;
+          longest_streak: number;
+          last_logged_date: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          current_streak?: number;
+          longest_streak?: number;
+          last_logged_date?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          current_streak?: number;
+          longest_streak?: number;
+          last_logged_date?: string | null;
           updated_at?: string;
         };
         Relationships: [];
