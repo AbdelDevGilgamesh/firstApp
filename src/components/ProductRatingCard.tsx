@@ -27,6 +27,7 @@ type NutrientCardProps = {
   label: string;
   maxValue: number;
   tone?: 'success' | 'warning' | 'neutral';
+  unit?: string;
   value: number;
 };
 
@@ -85,53 +86,49 @@ export function ProductRatingCard({ food, onAddToToday, onDismiss }: ProductRati
           shadowColor: theme.shadow,
         },
       ]}>
-      <View style={styles.badgeRow}>
-        <View style={[styles.badge, { backgroundColor: theme.chipBackground }]}>
-          <Text style={[styles.badgeText, { color: theme.primary }]}>Nutrition Review</Text>
+      <View style={styles.summaryShell}>
+        <View style={styles.badgeRow}>
+          <View style={[styles.badge, { backgroundColor: theme.chipBackground }]}>
+            <Text style={[styles.badgeText, { color: theme.primary }]}>Nutrition Review</Text>
+          </View>
+          <View style={[styles.badge, { backgroundColor: theme.chipBackground }]}>
+            <Text style={[styles.badgeText, { color: theme.mutedText }]}>{dataQualityLabel}</Text>
+          </View>
         </View>
-        <View style={[styles.badge, { backgroundColor: theme.chipBackground }]}>
-          <Text style={[styles.badgeText, { color: theme.mutedText }]}>{dataQualityLabel}</Text>
+
+        <View style={styles.summaryRow}>
+          <View style={styles.summaryText}>
+            <Text style={[styles.name, { color: theme.text }]}>{food.name}</Text>
+            <Text style={[styles.meta, { color: theme.mutedText }]}>
+              {food.baseCalories ?? food.calories} kcal per {baseQuantity}
+              {unit}
+            </Text>
+          </View>
+          <View style={[styles.scoreBadge, { borderColor: ratingColor, backgroundColor: theme.cardAlt }]}>
+            <Text style={[styles.score, { color: ratingColor }]}>{rating.score}</Text>
+            <Text style={[styles.scoreLabel, { color: theme.mutedText }]}>/ 100</Text>
+          </View>
+        </View>
+
+        <Text style={[styles.scoreRating, { color: ratingColor }]}>{rating.label}</Text>
+      </View>
+
+      <View style={[styles.conclusion, { backgroundColor: theme.cardAlt, borderColor: ratingColor }]}>
+        <View style={[styles.conclusionAccent, { backgroundColor: ratingColor }]} />
+        <View style={styles.conclusionTextBlock}>
+          <Text style={[styles.conclusionTitle, { color: ratingColor }]}>{description.headline}</Text>
+          <Text style={[styles.conclusionText, { color: theme.text }]}>{description.subtitle}</Text>
         </View>
       </View>
 
-      <View style={styles.summaryRow}>
-        <View style={styles.summaryText}>
-          <Text style={[styles.name, { color: theme.text }]}>{food.name}</Text>
-          <Text style={[styles.meta, { color: theme.mutedText }]}>
-            {food.baseCalories ?? food.calories} kcal - per {baseQuantity}
-            {unit}
-          </Text>
-        </View>
-        <View style={[styles.scoreBadge, { borderColor: ratingColor, backgroundColor: theme.cardAlt }]}>
-          <Text style={[styles.score, { color: ratingColor }]}>{rating.score}</Text>
-          <Text style={[styles.scoreLabel, { color: theme.mutedText }]}>/ 100</Text>
-          <Text style={[styles.scoreRating, { color: ratingColor }]}>{rating.label}</Text>
-        </View>
-      </View>
-
-      <View
-        style={[
-          styles.conclusion,
-          {
-            backgroundColor: theme.cardAlt,
-            borderColor: ratingColor,
-          },
-        ]}>
-        <Text style={[styles.conclusionTitle, { color: ratingColor }]}>{description.headline}</Text>
-        <Text style={[styles.conclusionText, { color: theme.text }]}>{description.subtitle}</Text>
-      </View>
-
-      <View style={styles.section}>
+      <View style={[styles.section, styles.macroSection]}>
         <Text style={[styles.sectionTitle, { color: theme.text }]}>Macronutrient profile</Text>
-        <View style={styles.nutrientGrid}>
+        <View style={styles.nutrientList}>
           <NutrientCard label="Protein" maxValue={30} tone="success" value={food.protein} />
           <NutrientCard label="Carbohydrates" maxValue={80} value={food.carbs} />
           <NutrientCard label="Fat" maxValue={45} tone={food.fat > 25 ? 'warning' : 'neutral'} value={food.fat} />
           {typeof food.sugar === 'number' ? (
             <NutrientCard label="Sugars" maxValue={35} tone={food.sugar > 15 ? 'warning' : 'neutral'} value={food.sugar} />
-          ) : null}
-          {typeof food.salt === 'number' ? (
-            <NutrientCard label="Salt" maxValue={4} tone={food.salt > 1.5 ? 'warning' : 'neutral'} value={food.salt} />
           ) : null}
           {typeof food.saturatedFat === 'number' ? (
             <NutrientCard
@@ -170,7 +167,7 @@ export function ProductRatingCard({ food, onAddToToday, onDismiss }: ProductRati
         </View>
       </View>
 
-      <View style={[styles.dataBox, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
+      <View style={[styles.dataBox, { backgroundColor: theme.cardAlt }]}>
         <Text style={[styles.dataTitle, { color: theme.text }]}>Based on available nutrition data</Text>
         <Text style={[styles.dataText, { color: theme.mutedText }]}>
           {description.availableDataLabels.join(', ')}
@@ -185,7 +182,7 @@ export function ProductRatingCard({ food, onAddToToday, onDismiss }: ProductRati
         <PressableScale
           accessibilityRole="button"
           onPress={onAddToToday}
-          style={styles.primaryButton}>
+          style={[styles.primaryButton, { backgroundColor: theme.success }]}>
           <Text style={styles.primaryButtonText}>Add to today</Text>
         </PressableScale>
         <PressableScale
@@ -202,7 +199,7 @@ export function ProductRatingCard({ food, onAddToToday, onDismiss }: ProductRati
   );
 }
 
-function NutrientCard({ label, maxValue, tone = 'neutral', value }: NutrientCardProps) {
+function NutrientCard({ label, maxValue, tone = 'neutral', unit = 'g', value }: NutrientCardProps) {
   const theme = useAppTheme();
   const progress = `${Math.min((value / maxValue) * 100, 100)}%` as const;
   const color =
@@ -213,11 +210,19 @@ function NutrientCard({ label, maxValue, tone = 'neutral', value }: NutrientCard
         : theme.primary;
 
   return (
-    <View style={[styles.nutrientCard, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
-      <Text style={[styles.nutrientValue, { color: theme.text }]}>{formatValue(value)}g</Text>
-      <Text style={[styles.nutrientLabel, { color: theme.mutedText }]}>{label}</Text>
-      <View style={[styles.nutrientTrack, { backgroundColor: theme.chipBackground }]}>
-        <View style={[styles.nutrientFill, { backgroundColor: color, width: progress }]} />
+    <View style={styles.nutrientRow}>
+      <View style={[styles.nutrientDot, { backgroundColor: color }]} />
+      <View style={styles.nutrientContent}>
+        <View style={styles.nutrientHeader}>
+          <Text style={[styles.nutrientLabel, { color: theme.text }]}>{label}</Text>
+          <Text style={[styles.nutrientValue, { color: theme.text }]}>
+            {formatValue(value)}
+            {unit}
+          </Text>
+        </View>
+        <View style={[styles.nutrientTrack, { backgroundColor: theme.chipBackground }]}>
+          <View style={[styles.nutrientFill, { backgroundColor: color, width: progress }]} />
+        </View>
       </View>
     </View>
   );
@@ -226,13 +231,16 @@ function NutrientCard({ label, maxValue, tone = 'neutral', value }: NutrientCard
 const styles = StyleSheet.create({
   card: {
     gap: 16,
-    borderWidth: 1,
-    borderRadius: 16,
-    padding: 16,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.08,
-    shadowRadius: 18,
+    borderRadius: 24,
+    padding: 18,
+    paddingBottom: 28,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.07,
+    shadowRadius: 22,
     elevation: 2,
+  },
+  summaryShell: {
+    gap: 14,
   },
   badgeRow: {
     flexDirection: 'row',
@@ -251,7 +259,7 @@ const styles = StyleSheet.create({
   },
   summaryRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 14,
   },
   summaryText: {
@@ -259,46 +267,53 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   name: {
-    fontSize: 23,
+    fontSize: 24,
     fontWeight: '900',
-    lineHeight: 29,
+    lineHeight: 30,
   },
   meta: {
     fontSize: 14,
     fontWeight: '800',
   },
   scoreBadge: {
-    width: 96,
-    minHeight: 96,
+    width: 84,
+    height: 84,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderRadius: 18,
+    borderWidth: 3,
+    borderRadius: 42,
     padding: 8,
   },
   score: {
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: '900',
-    lineHeight: 34,
+    lineHeight: 31,
   },
   scoreLabel: {
     fontSize: 11,
     fontWeight: '900',
   },
   scoreRating: {
-    marginTop: 4,
-    textAlign: 'center',
-    fontSize: 11,
+    fontSize: 15,
     fontWeight: '900',
   },
   conclusion: {
-    gap: 5,
-    borderLeftWidth: 4,
-    borderRadius: 12,
-    padding: 13,
+    flexDirection: 'row',
+    gap: 12,
+    overflow: 'hidden',
+    borderRadius: 16,
+    padding: 14,
+  },
+  conclusionAccent: {
+    width: 4,
+    borderRadius: 999,
+  },
+  conclusionTextBlock: {
+    flex: 1,
+    gap: 4,
   },
   conclusionTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '900',
   },
   conclusionText: {
@@ -313,29 +328,42 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '900',
   },
-  nutrientGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
+  macroSection: {
+    paddingTop: 2,
   },
-  nutrientCard: {
-    minWidth: '47%',
+  nutrientList: {
+    gap: 12,
+  },
+  nutrientRow: {
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'center',
+  },
+  nutrientDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  nutrientContent: {
     flex: 1,
     gap: 7,
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
+  },
+  nutrientHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
   },
   nutrientValue: {
-    fontSize: 20,
+    fontSize: 14,
     fontWeight: '900',
   },
   nutrientLabel: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: '800',
   },
   nutrientTrack: {
-    height: 6,
+    height: 5,
     overflow: 'hidden',
     borderRadius: 6,
   },
@@ -344,7 +372,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   findingList: {
-    gap: 10,
+    gap: 9,
   },
   findingRow: {
     flexDirection: 'row',
@@ -371,8 +399,7 @@ const styles = StyleSheet.create({
   },
   dataBox: {
     gap: 4,
-    borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 12,
   },
   dataTitle: {
@@ -390,16 +417,15 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   actions: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     gap: 10,
+    paddingTop: 4,
   },
   primaryButton: {
-    minHeight: 50,
-    flex: 1,
+    minHeight: 54,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 10,
-    backgroundColor: '#2E7D57',
+    borderRadius: 16,
     paddingHorizontal: 12,
   },
   primaryButtonText: {
@@ -408,11 +434,10 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   secondaryButton: {
-    minHeight: 50,
-    flex: 1,
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 10,
+    borderRadius: 14,
     paddingHorizontal: 12,
   },
   secondaryButtonText: {

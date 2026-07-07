@@ -2375,6 +2375,197 @@ export default function AddFoodScreen() {
       : 'Example: homemade turkey sandwich with whole wheat bread';
     const providerLabel = getAiProviderLabel(result);
 
+    if (isMeal) {
+      return (
+        <KeyboardAvoidingView
+          behavior={Platform.select({ ios: 'padding', android: undefined })}
+          style={styles.keyboardView}>
+          <Screen scroll={false}>
+            <View style={styles.scanProductScreen}>
+              <View style={styles.scanFixedHeader}>
+                <View style={styles.scanHeaderTopRow}>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => setActiveMode('find')}
+                    style={({ pressed }) => [styles.scanBackButton, pressed && styles.buttonPressed]}>
+                    <Ionicons name="chevron-back" size={16} color={theme.primary} />
+                    <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
+                  </Pressable>
+                  <View style={[styles.scanTokenPill, { backgroundColor: theme.success + '18' }]}>
+                    <Ionicons name="leaf-outline" size={14} color={theme.success} />
+                    <Text style={[styles.scanTokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
+                  </View>
+                </View>
+                <View style={styles.scanHeaderTextBlock}>
+                  <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{t('add.buildMeal')}</Text>
+                  <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
+                    Describe your meal and review the ingredients before saving.
+                  </Text>
+                </View>
+              </View>
+
+              <ScrollView
+                contentContainerStyle={styles.buildMealAiScrollContent}
+                keyboardDismissMode="on-drag"
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}>
+                <View style={styles.buildMealIntroRow}>
+                  <View style={[styles.buildMealIntroIcon, { backgroundColor: theme.success + '18' }]}>
+                    <Ionicons name="sparkles-outline" size={16} color={theme.success} />
+                  </View>
+                  <View style={styles.buildMealIntroCopy}>
+                    <Text style={[styles.buildMealIntroTitle, { color: theme.text }]}>AI meal builder</Text>
+                    <Text style={[styles.buildMealIntroSubtitle, { color: theme.mutedText }]}>
+                      Write what you ate. We will draft editable ingredients.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={[styles.mealComposerPanel, { backgroundColor: theme.card, shadowColor: theme.shadow }]}>
+                  <Text style={[styles.mealComposerLabel, { color: theme.text }]}>What did you eat?</Text>
+                  <TextInput
+                    multiline
+                    onChangeText={setAiDescription}
+                    placeholder={placeholder}
+                    placeholderTextColor={theme.mutedText}
+                    style={[styles.mealComposerInput, { color: theme.text }]}
+                    value={aiDescription}
+                  />
+                  <View style={styles.mealComposerFooter}>
+                    <View style={[styles.mealComposerPill, { backgroundColor: theme.success + '10' }]}>
+                      <Ionicons name="sparkles-outline" size={15} color={theme.success} />
+                      <Text style={[styles.mealComposerPillText, { color: theme.mutedText }]}>
+                        Editable before saving
+                      </Text>
+                    </View>
+                    <Text style={[styles.mealComposerCount, { color: theme.mutedText }]}>
+                      {aiDescription.length}/500
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.buildMealHelperChips}>
+                  {['+ portions', '+ sauces', '+ drinks', '+ cooking method'].map((label) => (
+                      <View key={label} style={[styles.buildMealHelperChip, { backgroundColor: theme.chipBackground }]}>
+                        <Text style={[styles.buildMealHelperChipText, { color: theme.mutedText }]}>{label}</Text>
+                      </View>
+                  ))}
+                </View>
+
+                {!hasEnoughTokens ? (
+                  <View style={[styles.buildMealTokenNotice, { backgroundColor: theme.warning + '12' }]}>
+                    <Text style={[styles.buildMealTokenText, { color: theme.warning }]}>{t('ai.notEnoughTokens')}</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => router.push({ pathname: '/settings', params: { panel: 'tokens' } })}
+                      style={({ pressed }) => [
+                        styles.buildMealTokenButton,
+                        { backgroundColor: theme.primary },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Text style={styles.buildMealTokenButtonText}>{t('settings.tokens')}</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+
+                <View style={styles.buildMealActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={!canGenerate}
+                    onPress={handleGenerateAiMeal}
+                    style={({ pressed }) => [
+                      styles.buildMealGenerateButton,
+                      { backgroundColor: canGenerate ? theme.success : theme.chipBackground, shadowColor: theme.success },
+                      pressed && canGenerate ? styles.buttonPressed : null,
+                    ]}>
+                    <Ionicons name="sparkles-outline" size={18} color={canGenerate ? '#FFFFFF' : theme.mutedText} />
+                    <Text style={[styles.buildMealGenerateText, { color: canGenerate ? '#FFFFFF' : theme.mutedText }]}>
+                      {isGeneratingAiAutofill
+                        ? t('ai.creatingEstimate')
+                        : aiDescription.trim().length < 5
+                          ? 'Describe your meal first'
+                          : t('ai.generateIngredients')}
+                    </Text>
+                  </Pressable>
+                  <View style={styles.buildMealOrRow}>
+                    <View style={[styles.buildMealOrLine, { backgroundColor: theme.cardBorder }]} />
+                    <Text style={[styles.buildMealOrText, { color: theme.mutedText }]}>or</Text>
+                    <View style={[styles.buildMealOrLine, { backgroundColor: theme.cardBorder }]} />
+                  </View>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={openMealBuilderManually}
+                    style={({ pressed }) => [
+                      styles.buildMealManualButton,
+                      { backgroundColor: theme.card, borderColor: theme.cardBorder },
+                      pressed && styles.buttonPressed,
+                    ]}>
+                    <Ionicons name="create-outline" size={18} color={theme.text} />
+                    <Text style={[styles.buildMealManualText, { color: theme.text }]}>{t('ai.buildManually')}</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.buildMealExamples}>
+                  <Text style={[styles.buildMealExamplesTitle, { color: theme.text }]}>Try describing</Text>
+                  {[
+                    '2 eggs, toast, and coffee',
+                    'Chicken bowl with rice and avocado',
+                    'Greek yogurt with banana and honey',
+                  ].map((example) => (
+                    <View key={example} style={styles.buildMealExampleRow}>
+                      <View style={[styles.buildMealExampleDot, { backgroundColor: theme.success }]} />
+                      <Text style={[styles.buildMealExampleText, { color: theme.mutedText }]}>{example}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                {aiMealResult ? (
+                  <View style={[styles.card, surfaceStyle]}>
+                    <Text style={[styles.resultsTitle, textStyle]}>{t('ai.reviewBeforeSaving')}</Text>
+                    {providerLabel ? (
+                      <View style={[styles.aiProviderBadge, { backgroundColor: theme.chipBackground }]}>
+                        <Text style={[styles.aiProviderBadgeText, { color: aiMealResult.isDemo ? theme.warning : theme.primary }]}>
+                          {providerLabel}
+                        </Text>
+                      </View>
+                    ) : null}
+                    <Text style={[styles.foodResultName, textStyle]}>{aiMealResult.mealName}</Text>
+                    <View style={styles.aiResultList}>
+                      {aiMealResult.ingredients.map((ingredient) => (
+                        <View key={`${ingredient.name}-${ingredient.quantityValue}`} style={[styles.ingredientRow, softSurfaceStyle]}>
+                          <View style={styles.flexField}>
+                            <Text style={[styles.foodResultName, textStyle]}>
+                              {ingredient.name} · {ingredient.quantityValue}
+                              {ingredient.unit}
+                            </Text>
+                            <Text style={[styles.foodResultMeta, mutedTextStyle]}>
+                              {ingredient.calories} cal · P {ingredient.protein}g / C {ingredient.carbs}g / F {ingredient.fat}g
+                            </Text>
+                          </View>
+                        </View>
+                      ))}
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => applyAiMealEstimate(aiMealResult)}
+                        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
+                        <Text style={styles.buttonText}>Use this estimate</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => setAiMealResult(null)}
+                        style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
+                        <Text style={styles.secondaryButtonText}>Edit description</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                ) : null}
+              </ScrollView>
+            </View>
+          </Screen>
+        </KeyboardAvoidingView>
+      );
+    }
+
     return (
       <KeyboardAvoidingView
         behavior={Platform.select({ ios: 'padding', android: undefined })}
@@ -2524,32 +2715,101 @@ export default function AddFoodScreen() {
       <KeyboardAvoidingView
         behavior={Platform.select({ ios: 'padding', android: undefined })}
         style={styles.keyboardView}>
-        <Screen>
-          <AddModeHeader onBack={() => setActiveMode('find')} title="Scan meal" />
-
-          <ScrollView contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">
-            <View style={[styles.card, surfaceStyle]}>
-              <Text style={[styles.title, textStyle]}>Scan meal</Text>
-              <Text style={[styles.tokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
-              <Text style={[styles.subtitle, mutedTextStyle]}>
-                Take or choose a meal photo, then review an estimated calorie and macro result before saving.
-              </Text>
-
-              {!mealPhotoUri ? (
-                <View style={styles.rowFields}>
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => selectMealPhoto('camera')}
-                    style={({ pressed }) => [styles.manualButton, styles.flexField, pressed && styles.buttonPressed]}>
-                    <Text style={styles.manualButtonText}>Take photo</Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => selectMealPhoto('library')}
-                    style={({ pressed }) => [styles.secondaryButton, styles.flexField, pressed && styles.buttonPressed]}>
-                    <Text style={styles.secondaryButtonText}>Pick image</Text>
-                  </Pressable>
+        <Screen scroll={false}>
+          <View style={styles.scanProductScreen}>
+            <View style={styles.scanFixedHeader}>
+              <View style={styles.scanHeaderTopRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setActiveMode('find')}
+                  style={({ pressed }) => [styles.scanBackButton, pressed && styles.buttonPressed]}>
+                  <Ionicons name="chevron-back" size={16} color={theme.primary} />
+                  <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
+                </Pressable>
+                <View style={[styles.scanTokenPill, { backgroundColor: theme.success + '18' }]}>
+                  <Ionicons name="leaf-outline" size={14} color={theme.success} />
+                  <Text style={[styles.scanTokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
                 </View>
+              </View>
+              <View style={styles.scanHeaderTextBlock}>
+                <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>Scan meal</Text>
+                <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
+                  Take or choose a meal photo, then review the estimated calories and macros before saving.
+                </Text>
+              </View>
+            </View>
+
+            <ScrollView
+              contentContainerStyle={styles.scanMealScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}>
+              {!mealPhotoUri ? (
+                <>
+                  <View style={[styles.scanMealHeroPanel, { backgroundColor: theme.cardAlt, shadowColor: theme.shadow }]}>
+                    <View style={[styles.scanMealHeroIcon, { backgroundColor: theme.success + '18' }]}>
+                      <Ionicons name="restaurant-outline" size={26} color={theme.success} />
+                    </View>
+                    <View style={styles.scanMealHeroText}>
+                      <Text style={[styles.scanMealHeroTitle, { color: theme.text }]}>
+                        Estimate a meal from a photo
+                      </Text>
+                      <Text style={[styles.scanMealHeroDescription, { color: theme.mutedText }]}>
+                        Take a clear photo of your plate or choose one from your gallery.
+                      </Text>
+                    </View>
+                    <View style={styles.scanMealBadgeRow}>
+                      {['Calories', 'Macros', 'Portion estimate'].map((label) => (
+                        <View key={label} style={[styles.scanMealBadge, { backgroundColor: theme.card }]}>
+                          <Text style={[styles.scanMealBadgeText, { color: theme.success }]}>{label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+
+                  <View style={styles.scanMealActionGroup}>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => selectMealPhoto('camera')}
+                      style={({ pressed }) => [
+                        styles.scanMealPrimaryButton,
+                        { backgroundColor: theme.primary, shadowColor: theme.primary },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Ionicons name="camera-outline" size={18} color="#FFFFFF" />
+                      <Text style={styles.scanMealPrimaryText}>Take photo</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => selectMealPhoto('library')}
+                      style={({ pressed }) => [
+                        styles.scanMealSecondaryButton,
+                        { backgroundColor: theme.cardAlt },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Ionicons name="image-outline" size={18} color={theme.text} />
+                      <Text style={[styles.scanMealSecondaryText, { color: theme.text }]}>Pick image</Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.scanMealTipsSection}>
+                    <Text style={[styles.scanMealTipsTitle, { color: theme.text }]}>For better results</Text>
+                    <View style={[styles.scanMealTipsPanel, { backgroundColor: theme.success + '0F' }]}>
+                      {[
+                        ['sunny-outline', 'Good lighting'],
+                        ['scan-outline', 'Show the whole plate'],
+                        ['phone-portrait-outline', 'Avoid blurry photos'],
+                        ['eye-outline', 'Keep food visible'],
+                      ].map(([icon, label]) => (
+                        <View key={label} style={styles.scanMealTipRow}>
+                          <View style={[styles.scanMealTipIcon, { backgroundColor: theme.success + '18' }]}>
+                            <Ionicons name={icon as keyof typeof Ionicons.glyphMap} size={14} color={theme.success} />
+                          </View>
+                          <Text style={[styles.scanMealTipText, { color: theme.text }]}>{label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </>
               ) : null}
 
               {mealPhotoUri && !mealPhotoEstimateVisible ? (
@@ -2627,8 +2887,8 @@ export default function AddFoodScreen() {
                   />
                 </View>
               ) : null}
-            </View>
-          </ScrollView>
+            </ScrollView>
+          </View>
         </Screen>
       </KeyboardAvoidingView>
     );
@@ -3606,9 +3866,19 @@ function ScanProductScreen({
     !isSavingNutritionProduct;
   const hasEnoughNutritionTextToParse = nutritionFactsText.trim().length >= 5;
   const hasScanResult = Boolean(scannedValue || pendingFood || incompleteProduct || networkErrorBarcode || notFoundValue);
+  const hasCapturedNutritionImage = Boolean(nutritionFactsImageUri);
+  const shouldShowNutritionReviewSection =
+    Boolean(nutritionFactsBarcode) && hasCapturedNutritionImage && nutritionFactsStep === 'review';
+  const shouldShowNutritionFallbackSection =
+    Boolean(nutritionFactsBarcode) &&
+    hasCapturedNutritionImage &&
+    nutritionFactsStep !== 'review';
+  const shouldShowNutritionReadSection = shouldShowNutritionReviewSection || shouldShowNutritionFallbackSection;
   const shouldShowCamera =
     scanMode === 'nutritionLabel'
-      ? nutritionFactsStep === 'idle' || nutritionFactsStep === 'loading'
+      ? Boolean(nutritionFactsBarcode) &&
+        !hasCapturedNutritionImage &&
+        !shouldShowNutritionReviewSection
       : !hasScanResult;
 
   async function handleBarcodeScanned(result: BarcodeScanningResult) {
@@ -3764,22 +4034,37 @@ function ScanProductScreen({
     <KeyboardAvoidingView
       behavior={Platform.select({ ios: 'padding', android: undefined })}
       style={styles.keyboardView}>
-      <Screen>
-        <AddModeHeader onBack={onBack} title={t('scanProduct.title')} />
+      <Screen scroll={false}>
+        <View style={styles.scanProductScreen}>
+          <View style={styles.scanFixedHeader}>
+            <View style={styles.scanHeaderTopRow}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={onBack}
+                style={({ pressed }) => [styles.scanBackButton, pressed && styles.buttonPressed]}>
+                <Ionicons name="chevron-back" size={16} color={theme.primary} />
+                <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
+              </Pressable>
+              <View style={[styles.scanTokenPill, { backgroundColor: theme.success + '18' }]}>
+                <Ionicons name="leaf-outline" size={14} color={theme.success} />
+                <Text style={[styles.scanTokenText, { color: theme.success }]}>
+                  {t('scanProduct.tokens', { count: tokenBalance })}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.scanHeaderTextBlock}>
+              <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{t('scanProduct.title')}</Text>
+              <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
+                {t('scanProduct.scanDescription')}
+              </Text>
+            </View>
+          </View>
 
-        <View
-          style={[
-            styles.card,
-            {
-              backgroundColor: theme.card,
-              borderColor: theme.cardBorder,
-              borderWidth: 1,
-              shadowColor: theme.shadow,
-            },
-          ]}>
-          <Text style={[styles.title, { color: theme.text }]}>{t('scanProduct.title')}</Text>
-          <Text style={[styles.tokenText, { color: theme.success }]}>{t('scanProduct.tokens', { count: tokenBalance })}</Text>
-          <Text style={[styles.subtitle, { color: theme.mutedText }]}>{t('scanProduct.scanDescription')}</Text>
+          <ScrollView
+            contentContainerStyle={styles.scanProductScrollContent}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}>
 
           {!permission ? (
             <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>{t('scanProduct.checkingPermission')}</Text>
@@ -3794,46 +4079,67 @@ function ScanProductScreen({
               </Pressable>
             </View>
           ) : !shouldShowCamera ? null : (
-            <View
-              onLayout={(event) => setCameraPreviewLayout(event.nativeEvent.layout)}
-              style={styles.cameraContainer}>
-              <CameraView
-                ref={cameraRef}
-                barcodeScannerSettings={{
-                  barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'],
-                }}
-                onBarcodeScanned={
-                  scanMode === 'barcode' && !scannedValue ? handleBarcodeScanned : undefined
-                }
-                style={styles.camera}
-              />
-              {scanMode === 'nutritionLabel' ? (
-                <View pointerEvents="box-none" style={styles.nutritionCameraOverlay}>
-                  <View
-                    onLayout={(event) => setNutritionFrameLayout(event.nativeEvent.layout)}
-                    style={styles.nutritionFrame}>
-                    <Text style={styles.nutritionFrameText}>{t('scanProduct.nutritionFacts')}</Text>
+            <>
+              <View
+                onLayout={(event) => setCameraPreviewLayout(event.nativeEvent.layout)}
+                style={[styles.cameraContainer, { shadowColor: theme.shadow }]}>
+                <CameraView
+                  ref={cameraRef}
+                  barcodeScannerSettings={{
+                    barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'],
+                  }}
+                  onBarcodeScanned={
+                    scanMode === 'barcode' && !scannedValue ? handleBarcodeScanned : undefined
+                  }
+                  style={styles.camera}
+                />
+                <View pointerEvents="none" style={styles.cameraDimOverlay} />
+                {scanMode === 'nutritionLabel' ? (
+                  <View pointerEvents="box-none" style={styles.nutritionCameraOverlay}>
+                    <View
+                      onLayout={(event) => setNutritionFrameLayout(event.nativeEvent.layout)}
+                      style={styles.nutritionFrame}>
+                      <View style={[styles.frameCorner, styles.frameCornerTopLeft]} />
+                      <View style={[styles.frameCorner, styles.frameCornerTopRight]} />
+                      <View style={[styles.frameCorner, styles.frameCornerBottomLeft]} />
+                      <View style={[styles.frameCorner, styles.frameCornerBottomRight]} />
+                      <View style={styles.nutritionFramePill}>
+                        <Ionicons name="document-text-outline" size={14} color="#FFFFFF" />
+                        <Text style={styles.nutritionFrameText}>{t('scanProduct.nutritionFacts')}</Text>
+                      </View>
+                    </View>
                   </View>
-                  <Text style={styles.nutritionCameraTip}>
-                    {t('scanProduct.labelFrameTip')}
-                  </Text>
-                  <View style={styles.nutritionCameraActions}>
-                    <Pressable
-                      accessibilityRole="button"
-                      disabled={isCapturingNutritionLabel || isExtractingNutritionText}
-                      onPress={handleCaptureNutritionLabel}
-                      style={({ pressed }) => [
-                        styles.manualButton,
-                        styles.fullWidthButton,
-                        (isCapturingNutritionLabel || isExtractingNutritionText) && styles.buttonDisabled,
-                        pressed && styles.buttonPressed,
-                      ]}>
-                      <Text style={styles.manualButtonText}>
-                        {isCapturingNutritionLabel || isExtractingNutritionText
-                          ? t('scanProduct.readingNutritionLabel')
-                          : t('scanProduct.captureNutritionLabel')}
-                      </Text>
-                    </Pressable>
+                ) : null}
+              </View>
+
+              {scanMode === 'nutritionLabel' ? (
+                <View style={styles.captureLabelSection}>
+                  <View style={styles.captureInstructionRow}>
+                    <View style={[styles.captureInstructionIcon, { backgroundColor: theme.success + '18' }]}>
+                      <Ionicons name="sparkles-outline" size={15} color={theme.success} />
+                    </View>
+                    <Text style={[styles.captureInstructionText, { color: theme.mutedText }]}>
+                      {t('scanProduct.labelFrameTip')}
+                    </Text>
+                  </View>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={isCapturingNutritionLabel || isExtractingNutritionText}
+                    onPress={handleCaptureNutritionLabel}
+                    style={({ pressed }) => [
+                      styles.capturePrimaryButton,
+                      { backgroundColor: theme.primary, shadowColor: theme.primary },
+                      (isCapturingNutritionLabel || isExtractingNutritionText) && styles.buttonDisabled,
+                      pressed && styles.buttonPressed,
+                    ]}>
+                    <Ionicons name="camera-outline" size={18} color="#FFFFFF" />
+                    <Text style={styles.capturePrimaryButtonText}>
+                      {isCapturingNutritionLabel || isExtractingNutritionText
+                        ? t('scanProduct.readingNutritionLabel')
+                        : t('scanProduct.captureNutritionLabel')}
+                    </Text>
+                  </Pressable>
+                  <View style={styles.captureSecondaryRow}>
                     <Pressable
                       accessibilityRole="button"
                       onPress={() => {
@@ -3843,19 +4149,43 @@ function ScanProductScreen({
                           void onPickNutritionFactsFromGallery(barcode);
                         }
                       }}
-                      style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                      <Text style={styles.secondaryButtonText}>{t('scanProduct.pickLabelFromGallery')}</Text>
+                      style={({ pressed }) => [
+                        styles.captureSecondaryButton,
+                        { backgroundColor: theme.cardAlt },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Text style={[styles.captureSecondaryText, { color: theme.text }]}>
+                        {t('scanProduct.pickLabelFromGallery')}
+                      </Text>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
                       onPress={handleBackToBarcodeScan}
-                      style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                      <Text style={styles.secondaryButtonText}>{t('scanProduct.backToBarcode')}</Text>
+                      style={({ pressed }) => [
+                        styles.captureSecondaryButton,
+                        { backgroundColor: theme.cardAlt },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Text style={[styles.captureSecondaryText, { color: theme.text }]}>
+                        {t('scanProduct.backToBarcode')}
+                      </Text>
                     </Pressable>
+                  </View>
+                  <View style={[styles.captureTipsRow, { backgroundColor: theme.success + '0F' }]}>
+                    {[
+                      ['sunny-outline', 'Good lighting'],
+                      ['resize-outline', 'Keep text flat'],
+                      ['eye-off-outline', 'Avoid glare'],
+                    ].map(([icon, label]) => (
+                      <View key={label} style={styles.captureTipChip}>
+                        <Ionicons name={icon as keyof typeof Ionicons.glyphMap} size={13} color={theme.success} />
+                        <Text style={[styles.captureTipText, { color: theme.text }]}>{label}</Text>
+                      </View>
+                    ))}
                   </View>
                 </View>
               ) : null}
-            </View>
+            </>
           )}
 
           {isLookingUp ? (
@@ -4025,8 +4355,8 @@ function ScanProductScreen({
             </View>
           ) : null}
 
-          {nutritionFactsBarcode ? (
-            <View style={styles.nutritionFlow}>
+          {shouldShowNutritionReadSection && nutritionFactsBarcode ? (
+            <View style={nutritionFactsStep === 'review' ? styles.nutritionFlow : styles.nutritionReadFlow}>
               {nutritionFactsStep === 'review' ? (
                 <>
                   <View style={styles.nutritionFlowHeader}>
@@ -4176,11 +4506,11 @@ function ScanProductScreen({
                 <>
                   <View style={styles.nutritionFlowHeader}>
                     <Pressable accessibilityRole="button" onPress={handleBackToBarcodeScan}>
-                      <Text style={styles.nutritionBackText}>Back</Text>
+                      <Text style={styles.nutritionBackText}>{t('common.back')}</Text>
                     </Pressable>
                     <Text style={styles.nutritionFlowTitle}>Read nutrition label</Text>
                     <Text style={styles.nutritionFlowSubtitle}>
-                      We couldn't read this product automatically. Add the nutrition values from the label.
+                      We couldn't read this product automatically.
                     </Text>
                   </View>
 
@@ -4196,53 +4526,32 @@ function ScanProductScreen({
                     </Pressable>
                   </View>
 
-                  {nutritionFactsStep === 'loading' || isExtractingNutritionText ? (
-                    <Text style={styles.nutritionSubtleNote}>Reading nutrition label...</Text>
-                  ) : null}
-                  {nutritionFactsOcrMessage ? (
-                    <Text style={styles.nutritionSubtleNote}>
-                      OCR isn't available in this build, so paste the label text manually.
-                    </Text>
-                  ) : null}
-
-                  <View style={styles.nutritionSectionCard}>
-                    <Text style={styles.nutritionSectionTitle}>What to type</Text>
-                    <Text style={styles.nutritionHelpText}>Energy / Valeur energetique</Text>
-                    <Text style={styles.nutritionHelpText}>Protein / Proteines</Text>
-                    <Text style={styles.nutritionHelpText}>Fat / Lipides</Text>
-                    <Text style={styles.nutritionHelpText}>Carbs / Glucides</Text>
-                  </View>
-
-                  <View style={styles.field}>
-                    <Text style={styles.nutritionInputLabel}>Nutrition text</Text>
-                    <TextInput
-                      multiline
-                      onChangeText={setNutritionFactsText}
-                      placeholder={`Example:\nVALEUR ENERGETIQUE 239.2 KCAL\nPROTEINES 26.2G\nLIPIDES 14.5G\nGLUCIDES 1.2G`}
-                      placeholderTextColor="#A3A8B2"
-                      style={styles.nutritionPasteInput}
-                      value={nutritionFactsText}
-                    />
+                  <View style={styles.nutritionInfoNotice}>
+                    <View style={styles.nutritionInfoIcon}>
+                      <Ionicons name="information-circle-outline" size={18} color="#2E7D57" />
+                    </View>
+                    <View style={styles.nutritionInfoTextBlock}>
+                      <Text style={styles.nutritionInfoTitle}>Manual entry needed</Text>
+                      <Text style={styles.nutritionInfoBody}>
+                        OCR is not available in this build. You can add this food manually.
+                      </Text>
+                    </View>
                   </View>
 
                   <Pressable
                     accessibilityRole="button"
-                    disabled={!hasEnoughNutritionTextToParse || nutritionFactsStep === 'loading'}
-                    onPress={onParseNutritionFactsText}
+                    onPress={onFillNutritionFactsManually}
                     style={({ pressed }) => [
                       styles.nutritionPrimaryButton,
-                      (!hasEnoughNutritionTextToParse || nutritionFactsStep === 'loading') && styles.buttonDisabled,
                       pressed && styles.buttonPressed,
                     ]}>
-                    <Text style={styles.nutritionPrimaryText}>{t('common.continue')}</Text>
-                  </Pressable>
-                  <Pressable accessibilityRole="button" onPress={onFillNutritionFactsManually}>
-                    <Text style={styles.nutritionTextButton}>Fill manually instead</Text>
+                    <Text style={styles.nutritionPrimaryText}>Add my food manually</Text>
                   </Pressable>
                 </>
               )}
             </View>
           ) : null}
+          </ScrollView>
         </View>
       </Screen>
     </KeyboardAvoidingView>
@@ -4386,6 +4695,189 @@ const styles = StyleSheet.create({
   },
   aiResultList: {
     gap: 10,
+  },
+  buildMealAiScrollContent: {
+    gap: 18,
+    paddingBottom: 140,
+  },
+  buildMealIntroRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    paddingHorizontal: 2,
+  },
+  buildMealIntroIcon: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 18,
+  },
+  buildMealIntroCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  buildMealIntroTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  buildMealIntroSubtitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  mealComposerPanel: {
+    gap: 10,
+    borderRadius: 22,
+    padding: 16,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.05,
+    shadowRadius: 18,
+    elevation: 1,
+  },
+  mealComposerLabel: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  mealComposerInput: {
+    minHeight: 132,
+    padding: 0,
+    fontSize: 16,
+    fontWeight: '700',
+    lineHeight: 22,
+    textAlignVertical: 'top',
+  },
+  mealComposerFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  mealComposerPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  mealComposerPillText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  mealComposerCount: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  buildMealHelperChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  buildMealHelperChip: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  buildMealHelperChipText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  buildMealTokenNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    borderRadius: 16,
+    padding: 12,
+  },
+  buildMealTokenText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  buildMealTokenButton: {
+    minHeight: 36,
+    justifyContent: 'center',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+  },
+  buildMealTokenButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  buildMealActions: {
+    gap: 10,
+  },
+  buildMealGenerateButton: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 2,
+  },
+  buildMealGenerateText: {
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  buildMealManualButton: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+  },
+  buildMealManualText: {
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  buildMealOrRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 2,
+  },
+  buildMealOrLine: {
+    height: 1,
+    flex: 1,
+  },
+  buildMealOrText: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  buildMealExamples: {
+    gap: 10,
+    paddingTop: 4,
+  },
+  buildMealExamplesTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  buildMealExampleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  buildMealExampleDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  buildMealExampleText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 18,
   },
   secondaryActionRow: {
     flexDirection: 'row',
@@ -4549,6 +5041,172 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '900',
   },
+  scanProductScreen: {
+    flex: 1,
+  },
+  scanFixedHeader: {
+    gap: 10,
+    paddingBottom: 14,
+  },
+  scanHeaderTopRow: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  scanBackButton: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: 999,
+    paddingRight: 10,
+  },
+  scanBackText: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  scanTokenPill: {
+    minHeight: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+  },
+  scanTokenText: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  scanHeaderTextBlock: {
+    gap: 4,
+  },
+  scanHeaderTitle: {
+    fontSize: 28,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  scanHeaderSubtitle: {
+    maxWidth: 330,
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  scanProductScrollContent: {
+    gap: 18,
+    paddingBottom: 140,
+  },
+  scanMealScrollContent: {
+    gap: 18,
+    paddingBottom: 140,
+  },
+  scanMealHeroPanel: {
+    gap: 16,
+    borderRadius: 24,
+    padding: 20,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.05,
+    shadowRadius: 22,
+    elevation: 2,
+  },
+  scanMealHeroIcon: {
+    width: 56,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+  },
+  scanMealHeroText: {
+    gap: 6,
+  },
+  scanMealHeroTitle: {
+    fontSize: 21,
+    fontWeight: '900',
+    lineHeight: 27,
+  },
+  scanMealHeroDescription: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  scanMealBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  scanMealBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  scanMealBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  scanMealActionGroup: {
+    gap: 10,
+  },
+  scanMealPrimaryButton: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.16,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  scanMealPrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  scanMealSecondaryButton: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+  },
+  scanMealSecondaryText: {
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  scanMealTipsSection: {
+    gap: 10,
+  },
+  scanMealTipsTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  scanMealTipsPanel: {
+    gap: 10,
+    borderRadius: 18,
+    padding: 12,
+  },
+  scanMealTipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  scanMealTipIcon: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+  },
+  scanMealTipText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '800',
+  },
   modeSwitch: {
     flexDirection: 'row',
     gap: 8,
@@ -4679,6 +5337,10 @@ const styles = StyleSheet.create({
     shadowRadius: 22,
     elevation: 2,
   },
+  nutritionReadFlow: {
+    gap: 18,
+    paddingBottom: 28,
+  },
   nutritionFlowHeader: {
     gap: 5,
   },
@@ -4702,14 +5364,11 @@ const styles = StyleSheet.create({
   nutritionImageCard: {
     position: 'relative',
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
     borderRadius: 20,
-    backgroundColor: '#FFFFFF',
-    padding: 8,
+    backgroundColor: '#F3F4F6',
     shadowColor: '#111827',
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.05,
     shadowRadius: 14,
   },
   nutritionRetakePill: {
@@ -4788,6 +5447,36 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     lineHeight: 18,
+  },
+  nutritionInfoNotice: {
+    flexDirection: 'row',
+    gap: 12,
+    borderRadius: 18,
+    backgroundColor: '#ECF7F0',
+    padding: 14,
+  },
+  nutritionInfoIcon: {
+    width: 34,
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 17,
+    backgroundColor: '#FFFFFF',
+  },
+  nutritionInfoTextBlock: {
+    flex: 1,
+    gap: 3,
+  },
+  nutritionInfoTitle: {
+    color: '#1F2937',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  nutritionInfoBody: {
+    color: '#5F6B64',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 19,
   },
   nutritionSummaryCard: {
     flexDirection: 'row',
@@ -5108,41 +5797,86 @@ const styles = StyleSheet.create({
   camera: {
     height: 360,
     overflow: 'hidden',
-    borderRadius: 8,
     backgroundColor: '#1E1F24',
   },
   cameraContainer: {
     minHeight: 360,
     overflow: 'hidden',
-    borderRadius: 8,
+    borderRadius: 24,
     backgroundColor: '#1E1F24',
+    shadowOffset: { width: 0, height: 16 },
+    shadowOpacity: 0.14,
+    shadowRadius: 24,
+    elevation: 4,
+  },
+  cameraDimOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(3,10,8,0.24)',
   },
   nutritionCameraOverlay: {
     ...StyleSheet.absoluteFillObject,
-    justifyContent: 'space-between',
-    padding: 16,
-    backgroundColor: 'rgba(0,0,0,0.18)',
-  },
-  nutritionFrame: {
-    height: 190,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 44,
-    marginBottom: 12,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-    borderRadius: 16,
-    backgroundColor: 'rgba(0,0,0,0.08)',
+    padding: 22,
   },
-  nutritionFrameText: {
+  nutritionFrame: {
+    width: '88%',
+    height: 198,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.38)',
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.02)',
+  },
+  frameCorner: {
+    position: 'absolute',
+    width: 34,
+    height: 34,
+    borderColor: 'rgba(255,255,255,0.55)',
+  },
+  frameCornerTopLeft: {
+    top: -1,
+    left: -1,
+    borderTopWidth: 2,
+    borderLeftWidth: 2,
+    borderTopLeftRadius: 22,
+  },
+  frameCornerTopRight: {
+    top: -1,
+    right: -1,
+    borderTopWidth: 2,
+    borderRightWidth: 2,
+    borderTopRightRadius: 22,
+  },
+  frameCornerBottomLeft: {
+    bottom: -1,
+    left: -1,
+    borderBottomWidth: 2,
+    borderLeftWidth: 2,
+    borderBottomLeftRadius: 22,
+  },
+  frameCornerBottomRight: {
+    right: -1,
+    bottom: -1,
+    borderRightWidth: 2,
+    borderBottomWidth: 2,
+    borderBottomRightRadius: 22,
+  },
+  nutritionFramePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     overflow: 'hidden',
     borderRadius: 999,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: 'rgba(0,0,0,0.56)',
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+  },
+  nutritionFrameText: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '900',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
   },
   nutritionCameraTip: {
     color: '#FFFFFF',
@@ -5156,6 +5890,82 @@ const styles = StyleSheet.create({
   nutritionCameraActions: {
     gap: 8,
     marginTop: 12,
+  },
+  captureLabelSection: {
+    gap: 14,
+  },
+  captureInstructionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 2,
+  },
+  captureInstructionIcon: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+  },
+  captureInstructionText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 19,
+  },
+  capturePrimaryButton: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  capturePrimaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  captureSecondaryRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  captureSecondaryButton: {
+    minHeight: 44,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+  },
+  captureSecondaryText: {
+    fontSize: 12,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  captureTipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    borderRadius: 18,
+    padding: 10,
+  },
+  captureTipChip: {
+    minHeight: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+  },
+  captureTipText: {
+    fontSize: 11,
+    fontWeight: '800',
   },
   notFoundBox: {
     gap: 12,
