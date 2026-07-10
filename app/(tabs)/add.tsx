@@ -44,10 +44,11 @@ import {
   AiMealEstimate,
   generateFoodFromDescription,
   generateMealFromDescription,
+  isAiModelUnavailableError,
   isAiQuotaExceededError,
   isAiTemporarilyUnavailableError,
 } from '@/src/services/aiAutofillService';
-import { extractNutritionTextFromImage } from '@/src/services/nutritionOcrService';
+import { NutritionVisionError, parseNutritionLabelImage } from '@/src/services/nutritionLabelVisionService';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { normalizeText, searchFoods } from '@/src/utils/foodSearch';
 import {
@@ -105,12 +106,27 @@ const CUSTOM_MEAL_LABEL = 'Custom';
 type AddMode = 'find' | 'meal' | 'scan' | 'mealPhoto' | 'mealAi' | 'customAi';
 type NutritionFactsStep = 'idle' | 'loading' | 'manualPaste' | 'review' | 'error';
 type ScanMode = 'barcode' | 'nutritionLabel';
+type ScanProductStep = 'barcodeScanner' | 'barcodeFallback' | 'nutritionFactsScanner' | 'nutritionReview';
+type BarcodeFallbackContext =
+  | { type: 'incompleteProduct'; product: IncompleteScannedProduct }
+  | { type: 'notFound'; barcode: string };
 type LayoutRect = { x: number; y: number; width: number; height: number };
 type NutritionServingBasis = '100g' | '100ml' | 'serving';
 
 function toNumber(value: string) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toOptionalFormNumber(value: string) {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return undefined;
+  }
+
+  const parsed = Number(trimmedValue);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function round(value: number, digits = 1) {
@@ -330,6 +346,10 @@ type OpenFoodFactsLookupResult =
   | { type: 'network_error'; message: string };
 
 type BarcodeLookupStatus = 'found' | 'incomplete' | 'not_found' | 'network_error';
+type ManualAddReturnContext =
+  | { type: 'incomplete'; product: IncompleteScannedProduct }
+  | { type: 'not_found'; barcode: string };
+type ScanFallbackRestore = { barcode: string; nonce: number };
 
 function toWords(value: string) {
   return value
@@ -529,6 +549,27 @@ export default function AddFoodScreen() {
     () => entries.find((entry) => entry.id === editingEntryId),
     [editingEntryId, entries],
   );
+
+  function openTokensPanel() {
+    router.push({ pathname: '/settings', params: { panel: 'tokens' } });
+  }
+
+  function renderHeaderTokenPill() {
+    return (
+      <Pressable
+        accessibilityLabel={`Buy tokens. Current balance ${tokenBalance} tokens.`}
+        accessibilityRole="button"
+        onPress={openTokensPanel}
+        style={({ pressed }) => [
+          styles.scanTokenPill,
+          { backgroundColor: theme.success + '18' },
+          pressed && styles.scanTokenPillPressed,
+        ]}>
+        <Ionicons name="leaf-outline" size={14} color={theme.success} />
+        <Text style={[styles.scanTokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
+      </Pressable>
+    );
+  }
   const allFoods = useMemo(
     () => [
       ...DEFAULT_FOODS,
@@ -562,6 +603,10 @@ export default function AddFoodScreen() {
   const [protein, setProtein] = useState('');
   const [carbs, setCarbs] = useState('');
   const [fat, setFat] = useState('');
+  const [sugar, setSugar] = useState('');
+  const [salt, setSalt] = useState('');
+  const [saturatedFat, setSaturatedFat] = useState('');
+  const [manualReviewSource, setManualReviewSource] = useState<'aiFoodEstimate' | null>(null);
   const [originalAiBase, setOriginalAiBase] = useState<{
     quantity: number;
     unit: string;
@@ -591,6 +636,8 @@ export default function AddFoodScreen() {
   const [incompleteScannedProduct, setIncompleteScannedProduct] = useState<IncompleteScannedProduct | null>(null);
   const [networkErrorBarcode, setNetworkErrorBarcode] = useState<string | null>(null);
   const [manualBarcode, setManualBarcode] = useState<string | null>(null);
+  const [manualAddReturnContext, setManualAddReturnContext] = useState<ManualAddReturnContext | null>(null);
+  const [scanFallbackRestore, setScanFallbackRestore] = useState<ScanFallbackRestore | null>(null);
   const [mealPhotoUri, setMealPhotoUri] = useState<string | null>(null);
   const [mealPhotoPortion, setMealPhotoPortion] = useState<MealPhotoPortionSize>('medium');
   const [mealPhotoCookingFat, setMealPhotoCookingFat] = useState<MealPhotoCookingFat>('none');
@@ -620,6 +667,7 @@ export default function AddFoodScreen() {
   const [aiFoodResult, setAiFoodResult] = useState<AiFoodEstimate | null>(null);
   const [isGeneratingAiAutofill, setIsGeneratingAiAutofill] = useState(false);
   const mealNameInputRef = useRef<TextInput>(null);
+  const aiDescriptionInputRef = useRef<TextInput>(null);
   const activeModeRef = useRef(activeMode);
   const detailsOpenRef = useRef(detailsOpen);
 
@@ -872,6 +920,10 @@ export default function AddFoodScreen() {
     setProtein('');
     setCarbs('');
     setFat('');
+    setSugar('');
+    setSalt('');
+    setSaturatedFat('');
+    setManualReviewSource(null);
     setOriginalAiBase(null);
     setMealLabel(nextMealLabel.selected);
     setCustomMealLabel(nextMealLabel.custom);
@@ -888,6 +940,8 @@ export default function AddFoodScreen() {
   function openFoodDetails(food: FoodDefinition) {
     Keyboard.dismiss();
     setSearchSheetVisible(false);
+    setManualAddReturnContext(null);
+    setScanFallbackRestore(null);
     setSelectedFood(food);
     setDetailsOpen(true);
     setManualMode(false);
@@ -898,6 +952,10 @@ export default function AddFoodScreen() {
     setProtein(String(food.protein));
     setCarbs(String(food.carbs));
     setFat(String(food.fat));
+    setSugar(food.sugar === undefined ? '' : String(food.sugar));
+    setSalt(food.salt === undefined ? '' : String(food.salt));
+    setSaturatedFat(food.saturatedFat === undefined ? '' : String(food.saturatedFat));
+    setManualReviewSource(null);
     setOriginalAiBase(null);
     const nextMealLabel = getMealLabelState();
     setMealLabel(nextMealLabel.selected);
@@ -944,6 +1002,8 @@ export default function AddFoodScreen() {
 
   function openCustomFoodManually() {
     resetAiAutofill();
+    setManualAddReturnContext(null);
+    setScanFallbackRestore(null);
     openManualDetails();
   }
 
@@ -959,6 +1019,10 @@ export default function AddFoodScreen() {
     setProtein('');
     setCarbs('');
     setFat('');
+    setSugar('');
+    setSalt('');
+    setSaturatedFat('');
+    setManualReviewSource(null);
     setOriginalAiBase(null);
     const nextMealLabel = getMealLabelState();
     setMealLabel(nextMealLabel.selected);
@@ -1008,6 +1072,10 @@ export default function AddFoodScreen() {
     setProtein(String(round(estimate.protein)));
     setCarbs(String(round(estimate.carbs)));
     setFat(String(round(estimate.fat)));
+    setSugar(estimate.sugar === undefined ? '' : String(round(estimate.sugar)));
+    setSalt(estimate.salt === undefined ? '' : String(round(estimate.salt)));
+    setSaturatedFat('');
+    setManualReviewSource('aiFoodEstimate');
     setOriginalAiBase({
       quantity: Number(quantityText),
       unit: unitText,
@@ -1018,8 +1086,14 @@ export default function AddFoodScreen() {
     });
     setMealLabel(nextMealLabel.selected);
     setCustomMealLabel(nextMealLabel.custom);
-    resetAiAutofill();
     setActiveMode('find');
+  }
+
+  function handleEditAiFoodDescription() {
+    setAiFoodResult(null);
+    setTimeout(() => {
+      aiDescriptionInputRef.current?.focus();
+    }, 50);
   }
 
   function getAiProviderLabel(result?: AiMealEstimate | AiFoodEstimate | null) {
@@ -1075,7 +1149,6 @@ export default function AddFoodScreen() {
 
       setAiMealResult(estimate);
     } catch (error) {
-      console.error('AI meal autofill failed', error);
       if (isAiQuotaExceededError(error)) {
         showToast({
           title: t('ai.limitReached'),
@@ -1088,7 +1161,14 @@ export default function AddFoodScreen() {
           message: t('ai.busyMessage'),
           type: 'warning',
         });
+      } else if (isAiModelUnavailableError(error)) {
+        showToast({
+          title: 'AI model unavailable',
+          message: 'No compatible AI model is available for this project.',
+          type: 'warning',
+        });
       } else {
+        console.error('AI meal autofill failed', error);
         showToast({ title: 'Could not create estimate', type: 'error' });
       }
     } finally {
@@ -1123,7 +1203,6 @@ export default function AddFoodScreen() {
 
       setAiFoodResult(estimate);
     } catch (error) {
-      console.error('AI food autofill failed', error);
       if (isAiQuotaExceededError(error)) {
         showToast({
           title: t('ai.limitReached'),
@@ -1136,7 +1215,14 @@ export default function AddFoodScreen() {
           message: t('ai.busyMessage'),
           type: 'warning',
         });
+      } else if (isAiModelUnavailableError(error)) {
+        showToast({
+          title: 'AI model unavailable',
+          message: 'No compatible AI model is available for this project.',
+          type: 'warning',
+        });
       } else {
+        console.error('AI food autofill failed', error);
         showToast({ title: 'Could not create estimate', type: 'error' });
       }
     } finally {
@@ -1447,8 +1533,9 @@ export default function AddFoodScreen() {
 
   function handleCompleteScannedProduct(product: IncompleteScannedProduct) {
     setPendingScannedFood(null);
-    setIncompleteScannedProduct(null);
     setNetworkErrorBarcode(null);
+    setManualAddReturnContext({ type: 'incomplete', product });
+    setScanFallbackRestore(null);
     setActiveMode('find');
     openManualDetails({ barcode: product.barcode, name: product.name });
   }
@@ -1457,6 +1544,8 @@ export default function AddFoodScreen() {
     setPendingScannedFood(null);
     setIncompleteScannedProduct(null);
     setNetworkErrorBarcode(null);
+    setManualAddReturnContext({ type: 'not_found', barcode });
+    setScanFallbackRestore(null);
     setActiveMode('find');
     openManualDetails({ barcode });
   }
@@ -1584,41 +1673,106 @@ export default function AddFoodScreen() {
     setParsedNutritionFacts(null);
     setNutritionFactsStep('loading');
     setIsExtractingNutritionText(true);
-    console.log('[Nutrition OCR] imageUri', imageUri);
+    showToast({
+      title: 'Reading nutrition label...',
+      message: 'We will fill values when the label is readable.',
+      type: 'info',
+    });
 
     try {
-      const ocrResult = await extractNutritionTextFromImage(imageUri);
-      const text = ocrResult.text.trim();
-      console.log('[Nutrition OCR] extracted text length', text.length);
+      const visionResult = await parseNutritionLabelImage({
+        imageUri,
+        productName: nutritionProductName,
+        barcode: nutritionFactsBarcode,
+      });
+      const hasUsableRequiredValue =
+        visionResult.parsed.calories !== undefined ||
+        [visionResult.parsed.protein, visionResult.parsed.carbs, visionResult.parsed.fat].filter(
+          (value) => value !== undefined,
+        ).length >= 2;
 
-      if (!text) {
-        throw new Error('No text was detected in the selected image.');
+      if (!hasUsableRequiredValue || visionResult.confidence === 'low') {
+        applyParsedNutritionFacts(visionResult.parsed);
+        setNutritionFactsOcrMessage('We could not read all values clearly. Retake the photo or add it manually.');
+        setNutritionFactsStep('manualPaste');
+        showToast({
+          title: 'Could not read label',
+          message: 'Try a clearer photo or add it manually.',
+          type: 'warning',
+        });
+        return;
       }
 
-      const parsed = parseNutritionFactsText(text);
-      console.log('[Nutrition OCR] parsed', parsed);
-      setNutritionFactsText(text);
-      applyParsedNutritionFacts(parsed);
-      setNutritionFactsOcrMessage('Detected from label with OCR. Please review before saving.');
+      if (visionResult.productName) {
+        setNutritionProductName(visionResult.productName);
+      }
+
+      setNutritionFactsText(visionResult.notes.join('\n'));
+      applyParsedNutritionFacts(visionResult.parsed);
+      setNutritionFactsOcrMessage('Detected from label with AI Vision. Please review before saving.');
       setNutritionFactsStep('review');
+      showToast({
+        title: 'Nutrition label extracted',
+        message: 'Review the values before saving.',
+        type: 'success',
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const normalizedMessage = message.toLowerCase();
-      const isExpectedOcrFallback =
-        normalizedMessage.includes('ocr is not available') ||
-        normalizedMessage.includes('cannot find native module') ||
-        normalizedMessage.includes('expotextextractor') ||
-        normalizedMessage.includes('no text was detected');
-      const fallbackMessage = normalizedMessage.includes('no text')
-        ? 'No text was detected. You can paste or type the nutrition values manually.'
-        : 'OCR is not available in this build. Paste nutrition text to continue.';
+      let fallbackMessage = 'We could not read all values clearly. Retake the photo or add it manually.';
+      let toastTitle = 'Could not read nutrition label';
+      let toastMessage = 'Try a clearer photo or add it manually.';
+      let toastType: 'warning' | 'error' | 'info' = 'warning';
 
-      if (isExpectedOcrFallback) {
-        console.warn('[Nutrition OCR fallback]', message);
+      if (error instanceof NutritionVisionError) {
+        if (error.code === 'AI_TEMPORARILY_UNAVAILABLE') {
+          fallbackMessage = 'AI is busy right now. Please try again in a moment.';
+          toastTitle = 'AI is busy';
+          toastMessage = 'Try again in a moment.';
+        } else if (error.code === 'AI_QUOTA_EXCEEDED') {
+          fallbackMessage = 'AI limit reached. Try again later or add it manually.';
+          toastTitle = 'AI limit reached';
+          toastMessage = 'Try again later or add it manually.';
+        } else if (error.code === 'NO_NUTRITION_VALUES_FOUND') {
+          fallbackMessage = 'No nutrition values found. Try a clearer photo or add it manually.';
+          toastTitle = 'No values found';
+          toastMessage = 'Make sure the nutrition table is inside the frame.';
+          toastType = 'info';
+        } else if (error.code === 'AI_RESPONSE_TRUNCATED') {
+          fallbackMessage = 'AI response was incomplete. Try again or retake the photo.';
+          toastTitle = 'AI response was incomplete';
+          toastMessage = 'Try again or retake the photo.';
+        } else if (error.code === 'INVALID_AI_RESPONSE' || error.code === 'GEMINI_EMPTY_RESPONSE') {
+          fallbackMessage = 'We could not read the label clearly. Try again or add it manually.';
+          toastTitle = 'Could not read label';
+          toastMessage = 'Try again or add it manually.';
+        } else if (
+          error.code === 'SUPABASE_NOT_CONFIGURED' ||
+          error.code === 'MISSING_GEMINI_KEY' ||
+          error.code === 'GEMINI_API_KEY_MISSING'
+        ) {
+          fallbackMessage = 'Nutrition label reading is not configured yet. Add this food manually.';
+          toastTitle = 'AI is not configured yet';
+          toastMessage = 'Add this food manually for now.';
+          toastType = 'error';
+        } else if (error.code === 'IMAGE_TOO_LARGE') {
+          fallbackMessage = 'Image is too large. Retake closer to the label or add it manually.';
+          toastTitle = 'Image is too large';
+          toastMessage = 'Retake closer to the label.';
+        } else if (error.code === 'UNSUPPORTED_IMAGE_TYPE' || error.code === 'MISSING_IMAGE') {
+          fallbackMessage = 'We could not prepare this image. Retake the photo or add it manually.';
+          toastTitle = 'Could not read image';
+          toastMessage = 'Retake the photo or add it manually.';
+        }
+
       } else {
-        console.error('Unexpected nutrition OCR error', error);
+        console.error('Unexpected nutrition vision error', error);
+        toastType = 'error';
       }
 
+      showToast({
+        title: toastTitle,
+        message: toastMessage,
+        type: toastType,
+      });
       setNutritionFactsOcrMessage(fallbackMessage);
       setNutritionFactsStep('manualPaste');
     } finally {
@@ -1790,6 +1944,37 @@ export default function AddFoodScreen() {
 
   function closeDetails() {
     if (!isEditing) {
+      if (manualReviewSource === 'aiFoodEstimate') {
+        setDetailsOpen(false);
+        setManualMode(false);
+        setSelectedFood(null);
+        setManualBarcode(null);
+        setManualReviewSource(null);
+        setActiveMode('customAi');
+        return;
+      }
+
+      if (manualAddReturnContext) {
+        setDetailsOpen(false);
+        setManualMode(false);
+        setSelectedFood(null);
+        setManualBarcode(null);
+        setPendingScannedFood(null);
+        setNetworkErrorBarcode(null);
+
+        if (manualAddReturnContext.type === 'incomplete') {
+          setIncompleteScannedProduct(manualAddReturnContext.product);
+          setScanFallbackRestore(null);
+        } else {
+          setIncompleteScannedProduct(null);
+          setScanFallbackRestore({ barcode: manualAddReturnContext.barcode, nonce: Date.now() });
+        }
+
+        setManualAddReturnContext(null);
+        setActiveMode('scan');
+        return;
+      }
+
       setDetailsOpen(false);
       setManualMode(false);
       setSelectedFood(null);
@@ -2065,7 +2250,7 @@ export default function AddFoodScreen() {
       {
         text: 'Get tokens',
         onPress: () => {
-          router.push('/settings');
+          openTokensPanel();
         },
       },
     ]);
@@ -2153,6 +2338,9 @@ export default function AddFoodScreen() {
       protein: round(toNumber(protein)),
       carbs: round(toNumber(carbs)),
       fat: round(toNumber(fat)),
+      sugar: toOptionalFormNumber(sugar),
+      salt: toOptionalFormNumber(salt),
+      saturatedFat: toOptionalFormNumber(saturatedFat),
       keywords: manualBarcode ? [name.trim(), manualBarcode] : undefined,
       source: manualBarcode ? 'barcode' : 'custom',
     });
@@ -2166,6 +2354,7 @@ export default function AddFoodScreen() {
     setSelectedFood(nextFood);
     setManualMode(false);
     setManualBarcode(null);
+    setManualReviewSource(null);
     Alert.alert('Food saved', `${name.trim()} will appear in search results.`);
   }
 
@@ -2188,6 +2377,9 @@ export default function AddFoodScreen() {
       const baseProtein = round(toNumber(protein));
       const baseCarbs = round(toNumber(carbs));
       const baseFat = round(toNumber(fat));
+      const optionalSugar = toOptionalFormNumber(sugar);
+      const optionalSalt = toOptionalFormNumber(salt);
+      const optionalSaturatedFat = toOptionalFormNumber(saturatedFat);
       const input = {
         name,
         foodKey: selectedFood ? getFoodKey(selectedFood) : manualBarcode ? `barcode:${manualBarcode}` : undefined,
@@ -2204,6 +2396,9 @@ export default function AddFoodScreen() {
         baseProtein: selectedFood?.protein ?? (manualMode ? baseProtein : undefined),
         baseCarbs: selectedFood?.carbs ?? (manualMode ? baseCarbs : undefined),
         baseFat: selectedFood?.fat ?? (manualMode ? baseFat : undefined),
+        sugar: optionalSugar,
+        salt: optionalSalt,
+        saturatedFat: optionalSaturatedFat,
         mealLabel: effectiveMealLabel,
       };
 
@@ -2225,6 +2420,9 @@ export default function AddFoodScreen() {
             protein: baseProtein,
             carbs: baseCarbs,
             fat: baseFat,
+            sugar: optionalSugar,
+            salt: optionalSalt,
+            saturatedFat: optionalSaturatedFat,
             keywords: [name.trim(), manualBarcode],
             source: 'barcode',
           };
@@ -2369,11 +2567,26 @@ export default function AddFoodScreen() {
     const result = isMeal ? aiMealResult : aiFoodResult;
     const hasEnoughTokens = canSpendTokens(AI_AUTOFILL_TOKEN_COST);
     const canGenerate = aiDescription.trim().length >= 5 && hasEnoughTokens && !isGeneratingAiAutofill;
-    const title = isMeal ? t('add.buildMeal') : t('add.addCustom');
     const placeholder = isMeal
       ? 'Example: chicken breast with rice, olive oil, and salad'
       : 'Example: homemade turkey sandwich with whole wheat bread';
     const providerLabel = getAiProviderLabel(result);
+    const foodNameMatch = aiFoodResult?.name.match(/^(.+?)\s*\((.+)\)\s*$/);
+    const foodPrimaryName = foodNameMatch?.[1]?.trim() || aiFoodResult?.name;
+    const foodSecondaryName = foodNameMatch?.[2]?.trim();
+    const foodProviderName =
+      aiFoodResult?.provider === 'gemini'
+        ? 'Gemini'
+        : aiFoodResult?.provider === 'openrouter'
+          ? 'OpenRouter'
+          : aiFoodResult?.provider === 'groq'
+            ? 'Groq'
+            : aiFoodResult?.provider === 'demo'
+              ? 'Demo'
+              : null;
+    const confidenceLabel = aiFoodResult
+      ? `${aiFoodResult.confidence.charAt(0).toUpperCase()}${aiFoodResult.confidence.slice(1)} confidence`
+      : null;
 
     if (isMeal) {
       return (
@@ -2391,10 +2604,7 @@ export default function AddFoodScreen() {
                     <Ionicons name="chevron-back" size={16} color={theme.primary} />
                     <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
                   </Pressable>
-                  <View style={[styles.scanTokenPill, { backgroundColor: theme.success + '18' }]}>
-                    <Ionicons name="leaf-outline" size={14} color={theme.success} />
-                    <Text style={[styles.scanTokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
-                  </View>
+                  {renderHeaderTokenPill()}
                 </View>
                 <View style={styles.scanHeaderTextBlock}>
                   <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{t('add.buildMeal')}</Text>
@@ -2570,77 +2780,236 @@ export default function AddFoodScreen() {
       <KeyboardAvoidingView
         behavior={Platform.select({ ios: 'padding', android: undefined })}
         style={styles.keyboardView}>
-        <Screen>
-          <AddModeHeader onBack={() => setActiveMode('find')} title={title} />
-          <View style={[styles.card, surfaceStyle]}>
-            <Text style={[styles.title, textStyle]}>{t('ai.describeWithAi')}</Text>
-            <Text style={[styles.subtitle, mutedTextStyle]}>
-              {isMeal
-                ? 'Tell us what you ate and we will draft ingredients for you.'
-                : 'Describe your food and we will draft nutrition values for you.'}
-            </Text>
-            <Text style={[styles.aiNote, { color: theme.warning }]}>{t('ai.estimateWarning')}</Text>
-            <View style={styles.field}>
-              <Text style={styles.label}>{isMeal ? 'Describe your meal' : 'Describe your food'}</Text>
-              <TextInput
-                multiline
-                onChangeText={setAiDescription}
-                placeholder={placeholder}
-                placeholderTextColor="#9A9FA6"
-                style={[styles.input, styles.aiDescriptionInput, inputStyle]}
-                value={aiDescription}
-              />
-            </View>
-            {!hasEnoughTokens ? (
-              <View style={[styles.aiWarningCard, { backgroundColor: theme.chipBackground }]}>
-                <Text style={[styles.foodResultMeta, { color: theme.warning }]}>{t('ai.notEnoughTokens')}</Text>
+        <Screen scroll={false}>
+          <View style={styles.scanProductScreen}>
+            <View style={styles.scanFixedHeader}>
+              <View style={styles.scanHeaderTopRow}>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() => router.push({ pathname: '/settings', params: { panel: 'tokens' } })}
-                  style={({ pressed }) => [styles.aiInlineButton, { backgroundColor: theme.primary }, pressed && styles.buttonPressed]}>
-                  <Text style={styles.aiInlineButtonText}>{t('settings.tokens')}</Text>
+                  onPress={() => setActiveMode('find')}
+                  style={({ pressed }) => [styles.scanBackButton, pressed && styles.buttonPressed]}>
+                  <Ionicons name="chevron-back" size={16} color={theme.primary} />
+                  <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
+                </Pressable>
+                {renderHeaderTokenPill()}
+              </View>
+              <View style={styles.scanHeaderTextBlock}>
+                <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{t('add.addCustom')}</Text>
+                <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
+                  Create a reusable food and save it locally.
+                </Text>
+              </View>
+            </View>
+            <ScrollView
+              contentContainerStyle={styles.buildMealAiScrollContent}
+              keyboardDismissMode="on-drag"
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}>
+              <View style={styles.buildMealIntroRow}>
+                <View style={[styles.buildMealIntroIcon, { backgroundColor: theme.success + '18' }]}>
+                  <Ionicons name="sparkles-outline" size={16} color={theme.success} />
+                </View>
+                <View style={styles.buildMealIntroCopy}>
+                  <Text style={[styles.buildMealIntroTitle, { color: theme.text }]}>AI food builder</Text>
+                  <Text style={[styles.buildMealIntroSubtitle, { color: theme.mutedText }]}>
+                    Tell us what you ate and we will draft nutrition values you can review before saving.
+                  </Text>
+                </View>
+              </View>
+
+              <View style={[styles.mealComposerPanel, { backgroundColor: theme.card, shadowColor: theme.shadow }]}>
+                <Text style={[styles.mealComposerLabel, { color: theme.text }]}>What did you eat?</Text>
+                <TextInput
+                  ref={aiDescriptionInputRef}
+                  multiline
+                  onChangeText={setAiDescription}
+                  placeholder={placeholder}
+                  placeholderTextColor={theme.mutedText}
+                  style={[styles.mealComposerInput, aiFoodResult && styles.mealComposerInputCompact, { color: theme.text }]}
+                  textAlignVertical="top"
+                  value={aiDescription}
+                />
+                <View style={styles.mealComposerFooter}>
+                  <View style={[styles.mealComposerPill, { backgroundColor: theme.success + '10' }]}>
+                    <Ionicons name="checkmark-circle-outline" size={15} color={theme.success} />
+                    <Text style={[styles.mealComposerPillText, { color: theme.mutedText }]}>
+                      Editable before saving
+                    </Text>
+                  </View>
+                  <Text style={[styles.mealComposerCount, { color: theme.mutedText }]}>{aiDescription.length}/500</Text>
+                </View>
+              </View>
+
+              <Text style={[styles.customAiComposerHint, { color: theme.mutedText }]}>Include portions for better results.</Text>
+
+              {!hasEnoughTokens ? (
+                <View style={[styles.buildMealTokenNotice, { backgroundColor: theme.warning + '12' }]}>
+                  <Text style={[styles.buildMealTokenText, { color: theme.warning }]}>{t('ai.notEnoughTokens')}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => router.push({ pathname: '/settings', params: { panel: 'tokens' } })}
+                    style={({ pressed }) => [
+                      styles.buildMealTokenButton,
+                      { backgroundColor: theme.primary },
+                      pressed && styles.buttonPressed,
+                    ]}>
+                    <Text style={styles.buildMealTokenButtonText}>{t('settings.tokens')}</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              <View style={styles.buildMealActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={!canGenerate}
+                  onPress={handleGenerateAiFood}
+                  style={({ pressed }) => [
+                    styles.buildMealGenerateButton,
+                    {
+                      backgroundColor: canGenerate ? theme.success : theme.chipBackground,
+                      shadowColor: theme.success,
+                    },
+                    pressed && canGenerate ? styles.buttonPressed : null,
+                  ]}>
+                  <Ionicons name="sparkles-outline" size={18} color={canGenerate ? '#FFFFFF' : theme.mutedText} />
+                  <Text style={[styles.buildMealGenerateText, { color: canGenerate ? '#FFFFFF' : theme.mutedText }]}>
+                    {isGeneratingAiAutofill
+                      ? t('ai.creatingEstimate')
+                      : aiDescription.trim().length < 5
+                        ? 'Describe your food first'
+                        : t('ai.generateFood')}
+                  </Text>
+                </Pressable>
+
+                <View style={styles.buildMealOrRow}>
+                  <View style={[styles.buildMealOrLine, { backgroundColor: theme.cardBorder }]} />
+                  <Text style={[styles.buildMealOrText, { color: theme.mutedText }]}>or</Text>
+                  <View style={[styles.buildMealOrLine, { backgroundColor: theme.cardBorder }]} />
+                </View>
+
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={openCustomFoodManually}
+                  style={({ pressed }) => [
+                    styles.buildMealManualButton,
+                    { backgroundColor: theme.card, borderColor: theme.cardBorder },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Ionicons name="create-outline" size={18} color={theme.text} />
+                  <Text style={[styles.buildMealManualText, { color: theme.text }]}>{t('ai.addManually')}</Text>
                 </Pressable>
               </View>
-            ) : null}
-            <Pressable
-              accessibilityRole="button"
-              disabled={!canGenerate}
-              onPress={isMeal ? handleGenerateAiMeal : handleGenerateAiFood}
-              style={({ pressed }) => [
-                styles.button,
-                !canGenerate && styles.buttonDisabled,
-                pressed && canGenerate ? styles.buttonPressed : null,
-              ]}>
-              <Text style={styles.buttonText}>
-                {isGeneratingAiAutofill
-                  ? t('ai.creatingEstimate')
-                  : isMeal
-                    ? t('ai.generateIngredients')
-                    : t('ai.generateFood')}
-              </Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              onPress={isMeal ? openMealBuilderManually : openCustomFoodManually}
-              style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
-              <Text style={styles.secondaryButtonText}>
-                {isMeal ? t('ai.buildManually') : t('ai.addManually')}
-              </Text>
-            </Pressable>
-          </View>
 
-          {result ? (
-            <View style={[styles.card, surfaceStyle]}>
+              {!aiFoodResult ? (
+                <View style={styles.buildMealExamples}>
+                  <Text style={[styles.buildMealExamplesTitle, { color: theme.text }]}>Try examples</Text>
+                  {['Greek yogurt with banana', 'Chicken sandwich with salad', 'Rice bowl with tuna'].map((example) => (
+                    <View key={example} style={styles.buildMealExampleRow}>
+                      <View style={[styles.buildMealExampleDot, { backgroundColor: theme.success }]} />
+                      <Text style={[styles.buildMealExampleText, { color: theme.mutedText }]}>{example}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
+              {aiFoodResult ? (
+                <View style={[styles.aiFoodResultPanel, { backgroundColor: theme.card, shadowColor: theme.shadow }]}>
+                  <View style={styles.aiFoodResultBadgeRow}>
+                    <View style={[styles.aiFoodResultBadge, { backgroundColor: theme.success + '12' }]}>
+                      <Ionicons name="sparkles-outline" size={13} color={theme.success} />
+                      <Text style={[styles.aiFoodResultBadgeText, { color: theme.success }]}>AI estimate</Text>
+                    </View>
+                    {foodProviderName ? (
+                      <View style={[styles.aiFoodProviderPill, { backgroundColor: theme.chipBackground }]}>
+                        <Text style={[styles.aiFoodProviderText, { color: aiFoodResult.isDemo ? theme.warning : theme.primary }]}>
+                          {foodProviderName}
+                        </Text>
+                      </View>
+                    ) : providerLabel ? (
+                      <View style={[styles.aiFoodProviderPill, { backgroundColor: theme.chipBackground }]}>
+                        <Text style={[styles.aiFoodProviderText, { color: theme.primary }]}>{providerLabel}</Text>
+                      </View>
+                    ) : null}
+                    {confidenceLabel ? (
+                      <View style={[styles.aiFoodConfidencePill, { backgroundColor: theme.chipBackground }]}>
+                        <Text style={[styles.aiFoodConfidenceText, { color: theme.mutedText }]}>{confidenceLabel}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.aiFoodResultMain}>
+                    <View style={styles.aiFoodNameBlock}>
+                      <Text style={[styles.aiFoodResultName, { color: theme.text }]}>{foodPrimaryName}</Text>
+                      {foodSecondaryName ? (
+                        <Text style={[styles.aiFoodResultAltName, { color: theme.mutedText }]}>{foodSecondaryName}</Text>
+                      ) : null}
+                      <Text style={[styles.aiFoodServingText, { color: theme.mutedText }]}>Per {aiFoodResult.servingSize}</Text>
+                    </View>
+                    <View style={[styles.aiFoodCaloriesBadge, { backgroundColor: theme.success + '12' }]}>
+                      <Text style={[styles.aiFoodCaloriesValue, { color: theme.success }]}>{aiFoodResult.calories}</Text>
+                      <Text style={[styles.aiFoodCaloriesLabel, { color: theme.success }]}>cal</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.aiFoodMacroRow}>
+                    {[
+                      { label: 'P', value: `${aiFoodResult.protein}g` },
+                      { label: 'C', value: `${aiFoodResult.carbs}g` },
+                      { label: 'F', value: `${aiFoodResult.fat}g` },
+                    ].map((macro) => (
+                      <View key={macro.label} style={[styles.aiFoodMacroPill, { backgroundColor: theme.chipBackground }]}>
+                        <Text style={[styles.aiFoodMacroLabel, { color: theme.mutedText }]}>{macro.label}</Text>
+                        <Text style={[styles.aiFoodMacroValue, { color: theme.text }]}>{macro.value}</Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  <View style={[styles.aiFoodReviewNote, { backgroundColor: theme.success + '0D' }]}>
+                    <Ionicons name="create-outline" size={15} color={theme.success} />
+                    <Text style={[styles.aiFoodReviewNoteText, { color: theme.mutedText }]}>
+                      Review and adjust before saving.
+                    </Text>
+                  </View>
+
+                  <View style={styles.aiFoodResultActions}>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => applyAiFoodEstimate(aiFoodResult)}
+                      style={({ pressed }) => [
+                        styles.aiFoodUseButton,
+                        { backgroundColor: theme.success, shadowColor: theme.success },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Ionicons name="checkmark-circle-outline" size={18} color="#FFFFFF" />
+                      <Text style={styles.aiFoodUseButtonText}>Use this estimate</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={handleEditAiFoodDescription}
+                      style={({ pressed }) => [
+                        styles.aiFoodEditButton,
+                        { backgroundColor: theme.card, borderColor: theme.cardBorder },
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Ionicons name="pencil-outline" size={17} color={theme.text} />
+                      <Text style={[styles.aiFoodEditButtonText, { color: theme.text }]}>Edit description</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+
+              {aiFoodResult ? (
+            <View style={[styles.card, surfaceStyle, styles.hiddenLegacyResult]}>
               <Text style={[styles.resultsTitle, textStyle]}>{t('ai.reviewBeforeSaving')}</Text>
               {providerLabel ? (
                 <View style={[styles.aiProviderBadge, { backgroundColor: theme.chipBackground }]}>
-                  <Text style={[styles.aiProviderBadgeText, { color: result?.isDemo ? theme.warning : theme.primary }]}>
+                  <Text style={[styles.aiProviderBadgeText, { color: aiFoodResult.isDemo ? theme.warning : theme.primary }]}>
                     {providerLabel}
                   </Text>
                 </View>
               ) : null}
               <Text style={[styles.foodResultMeta, mutedTextStyle]}>
-                {t('ai.estimateWarning')} Confidence: {result.confidence}
+                Review this editable estimate before saving. Confidence: {aiFoodResult.confidence}
               </Text>
               {isMeal && aiMealResult ? (
                 <View style={styles.aiResultList}>
@@ -2681,15 +3050,14 @@ export default function AddFoodScreen() {
               ) : null}
               <Pressable
                 accessibilityRole="button"
-                onPress={() => {
-                  setAiMealResult(null);
-                  setAiFoodResult(null);
-                }}
+                onPress={handleEditAiFoodDescription}
                 style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
                 <Text style={styles.secondaryButtonText}>Edit description</Text>
               </Pressable>
             </View>
           ) : null}
+            </ScrollView>
+          </View>
         </Screen>
       </KeyboardAvoidingView>
     );
@@ -2726,10 +3094,7 @@ export default function AddFoodScreen() {
                   <Ionicons name="chevron-back" size={16} color={theme.primary} />
                   <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
                 </Pressable>
-                <View style={[styles.scanTokenPill, { backgroundColor: theme.success + '18' }]}>
-                  <Ionicons name="leaf-outline" size={14} color={theme.success} />
-                  <Text style={[styles.scanTokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
-                </View>
+                {renderHeaderTokenPill()}
               </View>
               <View style={styles.scanHeaderTextBlock}>
                 <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>Scan meal</Text>
@@ -2929,6 +3294,9 @@ export default function AddFoodScreen() {
         nutritionSaturatedFat={nutritionSaturatedFat}
         onLookupBarcode={handleBarcodeScanned}
         onInternetLookup={handleInternetProductLookup}
+        onOpenTokens={openTokensPanel}
+        restoredFallback={scanFallbackRestore}
+        onFallbackRestored={() => setScanFallbackRestore(null)}
         pendingFood={pendingScannedFood}
         onBeginNutritionFactsScan={beginNutritionFactsScan}
         onBackToNutritionPaste={() => setNutritionFactsStep('manualPaste')}
@@ -2963,7 +3331,13 @@ export default function AddFoodScreen() {
 
           <View style={[styles.card, surfaceStyle]}>
             <Text style={[styles.title, textStyle]}>Prepare meal</Text>
-            <Text style={[styles.tokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
+            <Pressable
+              accessibilityLabel={`Buy tokens. Current balance ${tokenBalance} tokens.`}
+              accessibilityRole="button"
+              onPress={openTokensPanel}
+              style={({ pressed }) => [styles.tokenInlineButton, pressed && styles.scanTokenPillPressed]}>
+              <Text style={[styles.tokenText, { color: theme.success }]}>Tokens: {tokenBalance}</Text>
+            </Pressable>
             {isMealNameEditing || !mealName.trim() ? (
               <View style={styles.field}>
                 <Text style={styles.label}>Meal name</Text>
@@ -3234,11 +3608,17 @@ export default function AddFoodScreen() {
           </View>
 
           <View style={[styles.card, surfaceStyle]}>
-            <Text style={[styles.title, textStyle]}>{manualMode ? 'Add my food' : name}</Text>
+            <Text style={[styles.title, textStyle]}>
+              {manualReviewSource === 'aiFoodEstimate' ? 'Review food' : manualMode ? 'Add my food' : name}
+            </Text>
             {!manualMode && selectedFood ? (
               <Text style={[styles.subtitle, mutedTextStyle]}>
                 {selectedFood.baseCalories} cal · base serving {selectedFood.baseQuantity}
                 {selectedFood.unit}
+              </Text>
+            ) : manualReviewSource === 'aiFoodEstimate' ? (
+              <Text style={[styles.subtitle, mutedTextStyle]}>
+                Check and adjust the estimate before saving.
               </Text>
             ) : (
               <Text style={[styles.subtitle, mutedTextStyle]}>Create a reusable food and save it locally.</Text>
@@ -3396,6 +3776,53 @@ export default function AddFoodScreen() {
               </View>
             </View>
 
+            {manualReviewSource === 'aiFoodEstimate' || sugar || salt || saturatedFat ? (
+              <View style={styles.macroGrid}>
+                {manualReviewSource === 'aiFoodEstimate' || sugar ? (
+                  <View style={styles.macroField}>
+                    <Text style={styles.label}>{t('nutrition.sugar')}</Text>
+                    <TextInput
+                      inputMode="decimal"
+                      keyboardType="decimal-pad"
+                      onChangeText={setSugar}
+                      placeholder="0"
+                      placeholderTextColor="#9A9FA6"
+                      style={[styles.input, inputStyle]}
+                      value={sugar}
+                    />
+                  </View>
+                ) : null}
+                {manualReviewSource === 'aiFoodEstimate' || salt ? (
+                  <View style={styles.macroField}>
+                    <Text style={styles.label}>{t('nutrition.salt')}</Text>
+                    <TextInput
+                      inputMode="decimal"
+                      keyboardType="decimal-pad"
+                      onChangeText={setSalt}
+                      placeholder="0"
+                      placeholderTextColor="#9A9FA6"
+                      style={[styles.input, inputStyle]}
+                      value={salt}
+                    />
+                  </View>
+                ) : null}
+                {manualReviewSource === 'aiFoodEstimate' || saturatedFat ? (
+                  <View style={styles.macroField}>
+                    <Text style={styles.label}>{t('nutrition.saturatedFat')}</Text>
+                    <TextInput
+                      inputMode="decimal"
+                      keyboardType="decimal-pad"
+                      onChangeText={setSaturatedFat}
+                      placeholder="0"
+                      placeholderTextColor="#9A9FA6"
+                      style={[styles.input, inputStyle]}
+                      value={saturatedFat}
+                    />
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
             <Text style={styles.macroSummary}>
               P {round(toNumber(protein))}g / C {round(toNumber(carbs))}g / F{' '}
               {round(toNumber(fat))}g
@@ -3454,7 +3881,13 @@ export default function AddFoodScreen() {
                 style={[
                   styles.addIntroCard,
                   surfaceStyle,
-                  { borderWidth: 0, shadowColor: theme.shadow },
+                  {
+                    borderWidth: 0,
+                    borderColor: 'transparent',
+                    elevation: 0,
+                    shadowColor: theme.shadow,
+                    shadowOpacity: 0,
+                  },
                 ]}>
                 <View style={styles.addHubTitleGroup}>
                   <Text style={[styles.title, textStyle]}>{t('add.title')}</Text>
@@ -3515,7 +3948,13 @@ export default function AddFoodScreen() {
                 style={[
                   styles.addSectionCard,
                   surfaceStyle,
-                  { borderWidth: 0, shadowColor: theme.shadow },
+                  {
+                    backgroundColor: 'transparent',
+                    borderWidth: 0,
+                    elevation: 0,
+                    shadowColor: theme.shadow,
+                    shadowOpacity: 0,
+                  },
                 ]}>
                 <Text style={[styles.resultsTitle, textStyle]}>{t('add.scanOptions')}</Text>
                 <View style={styles.primaryScanGrid}>
@@ -3571,42 +4010,6 @@ export default function AddFoodScreen() {
               </View>
 
               <View style={styles.categoryBlock}>
-                <View style={styles.detachedCategorySection}>
-                  <ScrollView
-                    horizontal
-                    contentContainerStyle={styles.categoryRow}
-                    keyboardShouldPersistTaps="handled"
-                    showsHorizontalScrollIndicator={false}>
-                    {categories.map((category) => {
-                      const isSelected = category === selectedCategory;
-
-                      return (
-                        <Pressable
-                          accessibilityRole="button"
-                          key={category}
-                          onPress={() => setSelectedCategory(category)}
-                          style={({ pressed }) => [
-                            styles.categoryButton,
-                            chipStyle,
-                            isSelected && styles.categoryButtonSelected,
-                            pressed && styles.buttonPressed,
-                          ]}>
-                          <Text
-                            numberOfLines={1}
-                            style={[
-                              styles.categoryButtonText,
-                              { color: isSelected ? '#FFFFFF' : theme.mutedText },
-                            ]}>
-                            {category}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                  <View pointerEvents="none" style={[styles.categoryMoreHint, { backgroundColor: theme.background }]}>
-                    <Text style={[styles.categoryMoreHintText, { color: theme.mutedText }]}>›</Text>
-                  </View>
-                </View>
                 <Text style={[styles.resultsTitle, textStyle]}>{t('add.recentlyLogged')}</Text>
               </View>
             </View>
@@ -3748,6 +4151,9 @@ type ScanProductScreenProps = {
   onInternetLookup: (barcode: string) => Promise<'found' | 'not_found' | 'error'>;
   onParseNutritionFactsText: () => void;
   onLookupBarcode: (barcode: string) => Promise<BarcodeLookupStatus>;
+  onOpenTokens: () => void;
+  restoredFallback: ScanFallbackRestore | null;
+  onFallbackRestored: () => void;
   incompleteProduct: IncompleteScannedProduct | null;
   networkErrorBarcode: string | null;
   nutritionFactsBarcode: string | null;
@@ -3798,6 +4204,9 @@ function ScanProductScreen({
   onInternetLookup,
   onParseNutritionFactsText,
   onLookupBarcode,
+  onOpenTokens,
+  restoredFallback,
+  onFallbackRestored,
   incompleteProduct,
   networkErrorBarcode,
   nutritionFactsBarcode,
@@ -3842,6 +4251,9 @@ function ScanProductScreen({
   const { t } = useLanguage();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
+  const [currentStep, setCurrentStep] = useState<ScanProductStep>('barcodeScanner');
+  const [previousStep, setPreviousStep] = useState<ScanProductStep | null>(null);
+  const [fallbackContext, setFallbackContext] = useState<BarcodeFallbackContext | null>(null);
   const [scanMode, setScanMode] = useState<ScanMode>('barcode');
   const [scannedValue, setScannedValue] = useState<string | null>(null);
   const [notFoundValue, setNotFoundValue] = useState<string | null>(null);
@@ -3865,38 +4277,226 @@ function ScanProductScreen({
     tokenBalance >= 2 &&
     !isSavingNutritionProduct;
   const hasEnoughNutritionTextToParse = nutritionFactsText.trim().length >= 5;
-  const hasScanResult = Boolean(scannedValue || pendingFood || incompleteProduct || networkErrorBarcode || notFoundValue);
   const hasCapturedNutritionImage = Boolean(nutritionFactsImageUri);
+  const unresolvedScannedBarcode =
+    currentStep === 'barcodeFallback' &&
+    scannedValue &&
+    !pendingFood &&
+    !incompleteProduct &&
+    !networkErrorBarcode &&
+    !notFoundValue &&
+    !nutritionFactsBarcode &&
+    !isLookingUp
+      ? scannedValue
+      : null;
+  const barcodeFallbackValue = notFoundValue ?? unresolvedScannedBarcode;
+  const isBarcodeScannerStep = currentStep === 'barcodeScanner';
+  const isBarcodeFallbackStep = currentStep === 'barcodeFallback';
+  const isNutritionFactsScannerStep = currentStep === 'nutritionFactsScanner';
+  const isNutritionReviewStep = currentStep === 'nutritionReview';
+  const shouldShowBarcodeFallback =
+    isBarcodeFallbackStep &&
+    Boolean(barcodeFallbackValue) &&
+    fallbackContext?.type !== 'incompleteProduct' &&
+    !pendingFood &&
+    !incompleteProduct &&
+    !networkErrorBarcode &&
+    !isLookingUp;
+  const incompleteFallbackProduct =
+    incompleteProduct ?? (fallbackContext?.type === 'incompleteProduct' ? fallbackContext.product : null);
+  const shouldShowIncompleteFallback = isBarcodeFallbackStep && Boolean(incompleteFallbackProduct) && !isLookingUp;
+  const shouldShowNetworkFallback =
+    isBarcodeFallbackStep &&
+    fallbackContext?.type !== 'incompleteProduct' &&
+    Boolean(networkErrorBarcode) &&
+    !isLookingUp;
   const shouldShowNutritionReviewSection =
-    Boolean(nutritionFactsBarcode) && hasCapturedNutritionImage && nutritionFactsStep === 'review';
+    isNutritionReviewStep &&
+    Boolean(nutritionFactsBarcode) &&
+    hasCapturedNutritionImage &&
+    nutritionFactsStep === 'review';
   const shouldShowNutritionFallbackSection =
+    isNutritionReviewStep &&
     Boolean(nutritionFactsBarcode) &&
     hasCapturedNutritionImage &&
     nutritionFactsStep !== 'review';
   const shouldShowNutritionReadSection = shouldShowNutritionReviewSection || shouldShowNutritionFallbackSection;
-  const shouldShowCamera =
-    scanMode === 'nutritionLabel'
-      ? Boolean(nutritionFactsBarcode) &&
-        !hasCapturedNutritionImage &&
-        !shouldShowNutritionReviewSection
-      : !hasScanResult;
+  const shouldShowCamera = isBarcodeScannerStep || isNutritionFactsScannerStep;
+  const shouldShowBarcodeCamera = isBarcodeScannerStep;
+  const shouldShowNutritionFactsCamera = isNutritionFactsScannerStep;
+  const scanProductHeader = (() => {
+    if (isBarcodeScannerStep) {
+      return {
+        title: t('scanProduct.title'),
+        subtitle: t('scanProduct.scanDescription'),
+      };
+    }
 
-  async function handleBarcodeScanned(result: BarcodeScanningResult) {
-    if (scannedValue) {
+    if (isBarcodeFallbackStep) {
+      if (fallbackContext?.type === 'incompleteProduct' || incompleteFallbackProduct) {
+        return {
+          title: 'Product needs details',
+          subtitle: 'We found the product, but nutrition values are missing or invalid.',
+        };
+      }
+
+      return {
+        title: t('scanProduct.productNotFound'),
+        subtitle: 'Choose another way to add this product.',
+      };
+    }
+
+    if (isNutritionFactsScannerStep) {
+      return {
+        title: t('scanProduct.scanNutritionFacts'),
+        subtitle: 'Place the nutrition table inside the frame.',
+      };
+    }
+
+    if (isNutritionReviewStep && nutritionFactsStep !== 'review') {
+      return {
+        title: 'Read nutrition label',
+        subtitle: 'Try again or add the values manually.',
+      };
+    }
+
+    if (isNutritionReviewStep) {
+      return {
+        title: t('scanProduct.reviewNutrition'),
+        subtitle: 'Check the values before saving this product.',
+      };
+    }
+
+    return {
+      title: t('scanProduct.title'),
+      subtitle: t('scanProduct.scanDescription'),
+    };
+  })();
+
+  useEffect(() => {
+    if (!restoredFallback) {
       return;
     }
 
-    setScannedValue(result.data);
-    setIsLookingUp(true);
-    const status = await onLookupBarcode(result.data);
+    setScanMode('barcode');
+    setScannedValue(restoredFallback.barcode);
+    setNotFoundValue(restoredFallback.barcode);
     setIsLookingUp(false);
+    setIsInternetLookingUp(false);
+    setOnlineLookupMessage(null);
+    setCurrentStep('barcodeFallback');
+    onFallbackRestored();
+  }, [onFallbackRestored, restoredFallback]);
 
-    if (status === 'not_found') {
-      setNotFoundValue(result.data);
+  useEffect(() => {
+    if (nutritionFactsBarcode && hasCapturedNutritionImage) {
+      setCurrentStep('nutritionReview');
+      setScanMode('nutritionLabel');
+      return;
+    }
+
+    if (currentStep === 'nutritionFactsScanner') {
+      setScanMode('nutritionLabel');
+      return;
+    }
+
+    if (pendingFood) {
+      setFallbackContext(null);
+      setPreviousStep(null);
+      setCurrentStep('nutritionReview');
+      setScanMode('barcode');
+      return;
+    }
+
+    if (incompleteProduct) {
+      setFallbackContext({ type: 'incompleteProduct', product: incompleteProduct });
+      setPreviousStep(null);
+      setCurrentStep('barcodeFallback');
+      setScanMode('barcode');
+      return;
+    }
+
+    if (networkErrorBarcode) {
+      setFallbackContext({ type: 'notFound', barcode: networkErrorBarcode });
+      setPreviousStep(null);
+      setCurrentStep('barcodeFallback');
+      setScanMode('barcode');
+      return;
+    }
+
+    if (
+      currentStep === 'barcodeFallback' &&
+      !isLookingUp &&
+      !barcodeFallbackValue &&
+      !incompleteProduct &&
+      !networkErrorBarcode
+    ) {
+      setCurrentStep('barcodeScanner');
+      setScanMode('barcode');
+      setScannedValue(null);
+      return;
+    }
+
+    if (
+      currentStep === 'nutritionReview' &&
+      !isLookingUp &&
+      !pendingFood &&
+      !(nutritionFactsBarcode && hasCapturedNutritionImage)
+    ) {
+      setCurrentStep('barcodeScanner');
+      setScanMode('barcode');
+      setScannedValue(null);
+    }
+  }, [
+    barcodeFallbackValue,
+    currentStep,
+    hasCapturedNutritionImage,
+    incompleteProduct,
+    isLookingUp,
+    networkErrorBarcode,
+    nutritionFactsBarcode,
+    pendingFood,
+  ]);
+
+  async function handleBarcodeScanned(result: BarcodeScanningResult) {
+    if (scannedValue || isLookingUp) {
+      return;
+    }
+
+    const barcode = result.data;
+
+    setScannedValue(barcode);
+    setNotFoundValue(null);
+    setOnlineLookupMessage(null);
+    setIsLookingUp(true);
+
+    try {
+      const status = await onLookupBarcode(barcode);
+
+      if (status === 'found') {
+        setFallbackContext(null);
+        setPreviousStep(null);
+        setCurrentStep('nutritionReview');
+      } else {
+        if (status === 'not_found') {
+          setNotFoundValue(barcode);
+          setFallbackContext({ type: 'notFound', barcode });
+        }
+        setCurrentStep('barcodeFallback');
+      }
+    } catch {
+      setNotFoundValue(barcode);
+      setFallbackContext({ type: 'notFound', barcode });
+      setCurrentStep('barcodeFallback');
+    } finally {
+      setIsLookingUp(false);
     }
   }
 
   function resetBarcodeScanState() {
+    setCurrentStep('barcodeScanner');
+    setPreviousStep(null);
+    setFallbackContext(null);
     setScanMode('barcode');
     setScannedValue(null);
     setNotFoundValue(null);
@@ -3912,8 +4512,13 @@ function ScanProductScreen({
   }
 
   function handleStartNutritionFactsScan(barcode: string) {
-    onBeginNutritionFactsScan(barcode);
+    setPreviousStep(currentStep);
+    setCurrentStep('nutritionFactsScanner');
     setScanMode('nutritionLabel');
+    setIsLookingUp(false);
+    setIsInternetLookingUp(false);
+    setOnlineLookupMessage(null);
+    onBeginNutritionFactsScan(barcode);
   }
 
   function getImageSize(imageUri: string) {
@@ -3980,12 +4585,36 @@ function ScanProductScreen({
   }
 
   function handleBackToBarcodeScan() {
-    setScanMode('barcode');
-    onCancelNutritionFacts();
+    if (previousStep === 'barcodeFallback' && fallbackContext) {
+      setCurrentStep('barcodeFallback');
+      setPreviousStep(null);
+      setScanMode('barcode');
+      onCancelNutritionFacts();
+      return;
+    }
+
+    resetBarcodeScanState();
   }
 
   function handleNotNow() {
     handleScanAgain();
+  }
+
+  function handleScanProductBack() {
+    if (currentStep === 'nutritionFactsScanner' && previousStep === 'barcodeFallback' && fallbackContext) {
+      setCurrentStep('barcodeFallback');
+      setPreviousStep(null);
+      setScanMode('barcode');
+      onCancelNutritionFacts();
+      return;
+    }
+
+    if (currentStep !== 'barcodeScanner') {
+      resetBarcodeScanState();
+      return;
+    }
+
+    onBack();
   }
 
   async function handleTryAgain() {
@@ -3997,11 +4626,29 @@ function ScanProductScreen({
     }
 
     setIsLookingUp(true);
-    const status = await onLookupBarcode(barcode);
-    setIsLookingUp(false);
+    setNotFoundValue(null);
+    setOnlineLookupMessage(null);
 
-    if (status === 'not_found') {
+    try {
+      const status = await onLookupBarcode(barcode);
+
+      if (status === 'found') {
+        setFallbackContext(null);
+        setPreviousStep(null);
+        setCurrentStep('nutritionReview');
+      } else {
+        if (status === 'not_found') {
+          setNotFoundValue(barcode);
+          setFallbackContext({ type: 'notFound', barcode });
+        }
+        setCurrentStep('barcodeFallback');
+      }
+    } catch {
       setNotFoundValue(barcode);
+      setFallbackContext({ type: 'notFound', barcode });
+      setCurrentStep('barcodeFallback');
+    } finally {
+      setIsLookingUp(false);
     }
   }
 
@@ -4020,6 +4667,7 @@ function ScanProductScreen({
 
       if (status === 'found') {
         setNotFoundValue(null);
+        setCurrentStep('nutritionReview');
       } else if (status === 'not_found') {
         setOnlineLookupMessage(t('barcode.productNotFoundOnline'));
       } else {
@@ -4040,22 +4688,30 @@ function ScanProductScreen({
             <View style={styles.scanHeaderTopRow}>
               <Pressable
                 accessibilityRole="button"
-                onPress={onBack}
+                onPress={handleScanProductBack}
                 style={({ pressed }) => [styles.scanBackButton, pressed && styles.buttonPressed]}>
                 <Ionicons name="chevron-back" size={16} color={theme.primary} />
                 <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
               </Pressable>
-              <View style={[styles.scanTokenPill, { backgroundColor: theme.success + '18' }]}>
+              <Pressable
+                accessibilityLabel={`Buy tokens. Current balance ${tokenBalance} tokens.`}
+                accessibilityRole="button"
+                onPress={onOpenTokens}
+                style={({ pressed }) => [
+                  styles.scanTokenPill,
+                  { backgroundColor: theme.success + '18' },
+                  pressed && styles.scanTokenPillPressed,
+                ]}>
                 <Ionicons name="leaf-outline" size={14} color={theme.success} />
                 <Text style={[styles.scanTokenText, { color: theme.success }]}>
                   {t('scanProduct.tokens', { count: tokenBalance })}
                 </Text>
-              </View>
+              </Pressable>
             </View>
             <View style={styles.scanHeaderTextBlock}>
-              <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{t('scanProduct.title')}</Text>
+              <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{scanProductHeader.title}</Text>
               <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
-                {t('scanProduct.scanDescription')}
+                {scanProductHeader.subtitle}
               </Text>
             </View>
           </View>
@@ -4089,12 +4745,27 @@ function ScanProductScreen({
                     barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'],
                   }}
                   onBarcodeScanned={
-                    scanMode === 'barcode' && !scannedValue ? handleBarcodeScanned : undefined
+                    shouldShowBarcodeCamera && !scannedValue ? handleBarcodeScanned : undefined
                   }
                   style={styles.camera}
                 />
                 <View pointerEvents="none" style={styles.cameraDimOverlay} />
-                {scanMode === 'nutritionLabel' ? (
+                {shouldShowBarcodeCamera ? (
+                  <View pointerEvents="none" style={styles.barcodeCameraOverlay}>
+                    <View style={styles.barcodeFrame}>
+                      <View style={[styles.barcodeFrameCorner, styles.barcodeCornerTopLeft]} />
+                      <View style={[styles.barcodeFrameCorner, styles.barcodeCornerTopRight]} />
+                      <View style={[styles.barcodeFrameCorner, styles.barcodeCornerBottomLeft]} />
+                      <View style={[styles.barcodeFrameCorner, styles.barcodeCornerBottomRight]} />
+                      <View style={styles.barcodePill}>
+                        <Ionicons name="barcode-outline" size={15} color="#FFFFFF" />
+                        <Text style={styles.barcodePillText}>Barcode</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.barcodeHelperText}>Place the barcode inside the frame</Text>
+                  </View>
+                ) : null}
+                {shouldShowNutritionFactsCamera ? (
                   <View pointerEvents="box-none" style={styles.nutritionCameraOverlay}>
                     <View
                       onLayout={(event) => setNutritionFrameLayout(event.nativeEvent.layout)}
@@ -4112,7 +4783,7 @@ function ScanProductScreen({
                 ) : null}
               </View>
 
-              {scanMode === 'nutritionLabel' ? (
+              {shouldShowNutritionFactsCamera ? (
                 <View style={styles.captureLabelSection}>
                   <View style={styles.captureInstructionRow}>
                     <View style={[styles.captureInstructionIcon, { backgroundColor: theme.success + '18' }]}>
@@ -4195,7 +4866,7 @@ function ScanProductScreen({
             </View>
           ) : null}
 
-          {pendingFood && !isLookingUp ? (
+          {isNutritionReviewStep && pendingFood && !isLookingUp ? (
             <ProductRatingCard
               food={pendingFood}
               onAddToToday={onAddReviewedProduct}
@@ -4203,153 +4874,200 @@ function ScanProductScreen({
             />
           ) : null}
 
-          {incompleteProduct && !isLookingUp && !nutritionFactsBarcode ? (
-            <View style={[styles.notFoundBox, { backgroundColor: theme.cardAlt }]}>
-              <Text style={[styles.manualPromptText, { color: theme.text }]}>
-                {t('scanProduct.productDataIncomplete')}
+          {shouldShowIncompleteFallback && incompleteFallbackProduct ? (
+            <View style={[styles.scanFallbackPanel, { backgroundColor: theme.isDark ? '#15231C' : '#F3FAF3' }]}>
+              <View style={styles.scanFallbackHeaderRow}>
+                <View style={[styles.scanFallbackIcon, { backgroundColor: theme.success + '1F' }]}>
+                  <Ionicons name="checkmark-circle-outline" size={22} color={theme.success} />
+                </View>
+                <View style={styles.scanFallbackTextBlock}>
+                  <Text style={[styles.scanFallbackBadge, { color: theme.success }]}>PRODUCT FOUND</Text>
+                </View>
+              </View>
+              <Text style={[styles.scanFallbackProductName, { color: theme.text }]}>
+                {incompleteFallbackProduct.name}
+                {incompleteFallbackProduct.brand ? ` - ${incompleteFallbackProduct.brand}` : ''}
               </Text>
-              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
-                {incompleteProduct.name}
-                {incompleteProduct.brand ? ` - ${incompleteProduct.brand}` : ''}
+              <View style={[styles.scanBarcodePill, { backgroundColor: theme.cardAlt }]}>
+                <Ionicons name="barcode-outline" size={14} color={theme.mutedText} />
+                <Text style={[styles.scanBarcodePillText, { color: theme.mutedText }]}>
+                  {t('scanProduct.barcode', { barcode: incompleteFallbackProduct.barcode })}
+                </Text>
+              </View>
+              <View style={[styles.scanFallbackReason, { backgroundColor: theme.background }]}>
+                <Text style={[styles.scanFallbackReasonTitle, { color: theme.text }]}>
+                  Some nutrition data is missing.
+                </Text>
+                <Text style={[styles.scanFallbackReasonText, { color: theme.mutedText }]}>
+                  {incompleteFallbackProduct.validation.reason}
+                </Text>
+              </View>
+              <Text style={[styles.scanFallbackSubtitle, { color: theme.mutedText }]}>
+                We found this product, but nutrition values are missing or invalid.
               </Text>
-              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
-                {t('scanProduct.barcode', { barcode: incompleteProduct.barcode })}
-              </Text>
-              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
-                {incompleteProduct.validation.reason}
-              </Text>
-              <View style={styles.actionColumn}>
+              <View style={styles.scanFallbackActions}>
                 <Pressable
                   accessibilityRole="button"
                   disabled={nutritionFactsStep === 'loading' || isExtractingNutritionText}
-                  onPress={() => handleStartNutritionFactsScan(incompleteProduct.barcode)}
+                  onPress={() => handleStartNutritionFactsScan(incompleteFallbackProduct.barcode)}
                   style={({ pressed }) => [
-                    styles.manualButton,
-                    styles.fullWidthButton,
+                    styles.scanPrimaryAction,
+                    { backgroundColor: theme.primary, shadowColor: theme.primary },
                     (nutritionFactsStep === 'loading' || isExtractingNutritionText) && styles.buttonDisabled,
                     pressed && styles.buttonPressed,
                   ]}>
-                  <Text style={styles.manualButtonText}>{t('scanProduct.scanNutritionFacts')}</Text>
+                  <Ionicons name="document-text-outline" size={18} color="#FFFFFF" />
+                  <Text style={styles.scanPrimaryActionText}>{t('scanProduct.scanNutritionFacts')}</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() => onCompleteScannedProduct(incompleteProduct)}
-                  style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                  <Text style={styles.manualButtonText}>{t('scanProduct.completeManually')}</Text>
+                  onPress={() => onCompleteScannedProduct(incompleteFallbackProduct)}
+                  style={({ pressed }) => [
+                    styles.scanSecondaryAction,
+                    { backgroundColor: theme.cardAlt },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Ionicons name="create-outline" size={17} color={theme.text} />
+                  <Text style={[styles.scanSecondaryActionText, { color: theme.text }]}>
+                    {t('scanProduct.addManually')}
+                  </Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
                   onPress={handleScanAgain}
-                  style={({ pressed }) => [styles.manualButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                  <Text style={styles.secondaryButtonText}>{t('scanProduct.scanAgain')}</Text>
+                  style={({ pressed }) => [styles.scanTertiaryAction, pressed && styles.buttonPressed]}>
+                  <Ionicons name="refresh-outline" size={17} color={theme.primary} />
+                  <Text style={[styles.scanTertiaryActionText, { color: theme.primary }]}>
+                    {t('scanProduct.scanAgain')}
+                  </Text>
                 </Pressable>
               </View>
             </View>
           ) : null}
 
-          {networkErrorBarcode && !isLookingUp ? (
-            <View style={[styles.notFoundBox, { backgroundColor: theme.isDark ? '#3B241D' : '#F8EDE9' }]}>
-              <Text style={[styles.manualPromptText, { color: theme.text }]}>
-                {t('barcode.couldNotCheckDatabase')}
+          {shouldShowNetworkFallback && networkErrorBarcode ? (
+            <View style={[styles.scanFallbackPanel, { backgroundColor: theme.isDark ? '#261E16' : '#FFF8EA' }]}>
+              <View style={styles.scanFallbackHeaderRow}>
+                <View style={[styles.scanFallbackIcon, { backgroundColor: theme.warning + '22' }]}>
+                  <Ionicons name="alert-circle-outline" size={22} color={theme.warning} />
+                </View>
+                <View style={styles.scanFallbackTextBlock}>
+                  <Text style={[styles.scanFallbackBadge, { color: theme.warning }]}>LOOKUP ISSUE</Text>
+                </View>
+              </View>
+              <Text style={[styles.scanFallbackSubtitle, { color: theme.mutedText }]}>
+                We could not match this barcode in the local food database.
               </Text>
-              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>
-                {t('scanProduct.barcode', { barcode: networkErrorBarcode })}
-              </Text>
+              <View style={[styles.scanBarcodePill, { backgroundColor: theme.cardAlt }]}>
+                <Ionicons name="barcode-outline" size={14} color={theme.mutedText} />
+                <Text style={[styles.scanBarcodePillText, { color: theme.mutedText }]}>
+                  {t('scanProduct.barcode', { barcode: networkErrorBarcode })}
+                </Text>
+              </View>
               {onlineLookupMessage ? (
-                <Text style={[styles.foodResultMeta, { color: theme.warning }]}>{onlineLookupMessage}</Text>
+                <Text style={[styles.scanFallbackReasonText, { color: theme.warning }]}>{onlineLookupMessage}</Text>
               ) : null}
-              <View style={styles.actionColumn}>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={handleTryAgain}
-                  style={({ pressed }) => [styles.manualButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                  <Text style={styles.manualButtonText}>{t('scanProduct.tryAgain')}</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={isInternetLookingUp}
-                  onPress={handleInternetLookup}
-                  style={({ pressed }) => [
-                    styles.manualButton,
-                    styles.fullWidthButton,
-                    isInternetLookingUp && styles.buttonDisabled,
-                    pressed && styles.buttonPressed,
-                  ]}>
-                  <Text style={styles.manualButtonText}>
-                    {isInternetLookingUp ? t('common.loading') : t('barcode.internetLookupTokens')}
-                  </Text>
-                </Pressable>
+              <View style={styles.scanFallbackActions}>
                 <Pressable
                   accessibilityRole="button"
                   disabled={nutritionFactsStep === 'loading' || isExtractingNutritionText}
                   onPress={() => handleStartNutritionFactsScan(networkErrorBarcode)}
                   style={({ pressed }) => [
-                    styles.manualButton,
-                    styles.fullWidthButton,
+                    styles.scanPrimaryAction,
+                    { backgroundColor: theme.primary, shadowColor: theme.primary },
                     (nutritionFactsStep === 'loading' || isExtractingNutritionText) && styles.buttonDisabled,
                     pressed && styles.buttonPressed,
                   ]}>
-                  <Text style={styles.manualButtonText}>{t('barcode.scanNutritionLabel')}</Text>
+                  <Ionicons name="document-text-outline" size={18} color="#FFFFFF" />
+                  <Text style={styles.scanPrimaryActionText}>{t('scanProduct.scanNutritionFacts')}</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
                   onPress={() => onAddScannedProductManually(networkErrorBarcode)}
-                  style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                  <Text style={styles.secondaryButtonText}>{t('scanProduct.addManually')}</Text>
+                  style={({ pressed }) => [
+                    styles.scanSecondaryAction,
+                    { backgroundColor: theme.cardAlt },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Ionicons name="create-outline" size={17} color={theme.text} />
+                  <Text style={[styles.scanSecondaryActionText, { color: theme.text }]}>
+                    {t('scanProduct.addManually')}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleScanAgain}
+                  style={({ pressed }) => [styles.scanTertiaryAction, pressed && styles.buttonPressed]}>
+                  <Ionicons name="refresh-outline" size={17} color={theme.primary} />
+                  <Text style={[styles.scanTertiaryActionText, { color: theme.primary }]}>
+                    {t('scanProduct.scanAgain')}
+                  </Text>
                 </Pressable>
               </View>
             </View>
           ) : null}
 
-          {notFoundValue && !nutritionFactsBarcode ? (
-            <View style={[styles.notFoundBox, { backgroundColor: theme.isDark ? '#3B241D' : '#F8EDE9' }]}>
-              <Text style={[styles.manualPromptText, { color: theme.text }]}>{t('barcode.couldNotCheckDatabase')}</Text>
-              <Text style={[styles.foodResultMeta, { color: theme.mutedText }]}>{t('scanProduct.barcode', { barcode: notFoundValue })}</Text>
+          {shouldShowBarcodeFallback && barcodeFallbackValue ? (
+            <View style={[styles.scanFallbackPanel, { backgroundColor: theme.isDark ? '#261E16' : '#FFF8EA' }]}>
+              <View style={styles.scanFallbackHeaderRow}>
+                <View style={[styles.scanFallbackIcon, { backgroundColor: theme.warning + '22' }]}>
+                  <Ionicons name="search-outline" size={22} color={theme.warning} />
+                </View>
+                <View style={styles.scanFallbackTextBlock}>
+                  <Text style={[styles.scanFallbackBadge, { color: theme.warning }]}>NOT IN DATABASE</Text>
+                </View>
+              </View>
+              <Text style={[styles.scanFallbackSubtitle, { color: theme.mutedText }]}>
+                We could not match this barcode in the local food database.
+              </Text>
+              <View style={[styles.scanBarcodePill, { backgroundColor: theme.cardAlt }]}>
+                <Ionicons name="barcode-outline" size={14} color={theme.mutedText} />
+                <Text style={[styles.scanBarcodePillText, { color: theme.mutedText }]}>
+                  {t('scanProduct.barcode', { barcode: barcodeFallbackValue })}
+                </Text>
+              </View>
               {onlineLookupMessage ? (
-                <Text style={[styles.foodResultMeta, { color: theme.warning }]}>{onlineLookupMessage}</Text>
+                <Text style={[styles.scanFallbackReasonText, { color: theme.warning }]}>{onlineLookupMessage}</Text>
               ) : null}
-              <View style={styles.actionColumn}>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={handleScanAgain}
-                  style={({ pressed }) => [styles.manualButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                  <Text style={styles.manualButtonText}>{t('scanProduct.tryAgain')}</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={isInternetLookingUp}
-                  onPress={handleInternetLookup}
-                  style={({ pressed }) => [
-                    styles.manualButton,
-                    styles.fullWidthButton,
-                    isInternetLookingUp && styles.buttonDisabled,
-                    pressed && styles.buttonPressed,
-                  ]}>
-                  <Text style={styles.manualButtonText}>
-                    {isInternetLookingUp ? t('common.loading') : t('barcode.internetLookupTokens')}
-                  </Text>
-                </Pressable>
+              <View style={styles.scanFallbackActions}>
                 <Pressable
                   accessibilityRole="button"
                   disabled={nutritionFactsStep === 'loading' || isExtractingNutritionText}
-                  onPress={() => handleStartNutritionFactsScan(notFoundValue)}
+                  onPress={() => handleStartNutritionFactsScan(barcodeFallbackValue)}
                   style={({ pressed }) => [
-                    styles.manualButton,
-                    styles.fullWidthButton,
+                    styles.scanPrimaryAction,
+                    { backgroundColor: theme.primary, shadowColor: theme.primary },
                     (nutritionFactsStep === 'loading' || isExtractingNutritionText) && styles.buttonDisabled,
                     pressed && styles.buttonPressed,
                   ]}>
-                  <Text style={styles.manualButtonText}>
+                  <Ionicons name="document-text-outline" size={18} color="#FFFFFF" />
+                  <Text style={styles.scanPrimaryActionText}>
                     {nutritionFactsStep === 'loading' || isExtractingNutritionText
                       ? 'Reading nutrition label...'
-                      : t('barcode.scanNutritionLabel')}
+                      : t('scanProduct.scanNutritionFacts')}
                   </Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() => onAddScannedProductManually(notFoundValue)}
-                  style={({ pressed }) => [styles.secondaryButton, styles.fullWidthButton, pressed && styles.buttonPressed]}>
-                  <Text style={styles.secondaryButtonText}>{t('scanProduct.addManually')}</Text>
+                  onPress={() => onAddScannedProductManually(barcodeFallbackValue)}
+                  style={({ pressed }) => [
+                    styles.scanSecondaryAction,
+                    { backgroundColor: theme.cardAlt },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Ionicons name="create-outline" size={17} color={theme.text} />
+                  <Text style={[styles.scanSecondaryActionText, { color: theme.text }]}>
+                    {t('scanProduct.addManually')}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleScanAgain}
+                  style={({ pressed }) => [styles.scanTertiaryAction, pressed && styles.buttonPressed]}>
+                  <Ionicons name="refresh-outline" size={17} color={theme.primary} />
+                  <Text style={[styles.scanTertiaryActionText, { color: theme.primary }]}>
+                    {t('scanProduct.scanAgain')}
+                  </Text>
                 </Pressable>
               </View>
             </View>
@@ -4359,12 +5077,9 @@ function ScanProductScreen({
             <View style={nutritionFactsStep === 'review' ? styles.nutritionFlow : styles.nutritionReadFlow}>
               {nutritionFactsStep === 'review' ? (
                 <>
-                  <View style={styles.nutritionFlowHeader}>
-                    <Pressable accessibilityRole="button" onPress={onBackToNutritionPaste}>
-                      <Text style={styles.nutritionBackText}>{t('common.back')}</Text>
-                    </Pressable>
-                    <Text style={styles.nutritionFlowTitle}>{t('scanProduct.reviewNutrition')}</Text>
-                    <Text style={styles.nutritionFlowSubtitle}>{t('scanProduct.checkValuesBeforeSaving')}</Text>
+                  <View style={styles.nutritionSourcePill}>
+                    <Ionicons name="document-text-outline" size={13} color="#2E7D57" />
+                    <Text style={styles.nutritionSourcePillText}>From label</Text>
                   </View>
 
                   <View style={styles.nutritionSummaryCard}>
@@ -4391,52 +5106,61 @@ function ScanProductScreen({
                     </Text>
                   ) : null}
 
-                  <View style={styles.nutritionGrid}>
-                    <NutritionFactsField
-                      error={!isReviewNumberInRange(nutritionCalories, 0, 1000) ? 'Required' : null}
-                      label={t('nutrition.calories')}
-                      required
-                      unit="kcal"
-                      variant="full"
-                      value={nutritionCalories}
-                      onChangeText={setNutritionCalories}
-                    />
-                    <NutritionFactsField
-                      error={!isReviewNumberInRange(nutritionProtein, 0, 100) ? 'Required' : null}
-                      label={t('nutrition.protein')}
-                      required
-                      unit="g"
-                      value={nutritionProtein}
-                      onChangeText={setNutritionProtein}
-                    />
-                    <NutritionFactsField
-                      error={!isReviewNumberInRange(nutritionCarbs, 0, 100) ? 'Required' : null}
-                      label={t('nutrition.carbs')}
-                      required
-                      unit="g"
-                      value={nutritionCarbs}
-                      onChangeText={setNutritionCarbs}
-                    />
-                    <NutritionFactsField
-                      error={!isReviewNumberInRange(nutritionFat, 0, 100) ? 'Required' : null}
-                      label={t('nutrition.fat')}
-                      required
-                      unit="g"
-                      value={nutritionFat}
-                      onChangeText={setNutritionFat}
-                    />
-                    <NutritionFactsField label={t('nutrition.sugar')} unit="g" value={nutritionSugar} onChangeText={setNutritionSugar} />
-                    <NutritionFactsField label={t('nutrition.salt')} unit="g" value={nutritionSalt} onChangeText={setNutritionSalt} />
-                    <NutritionFactsField
-                      label={t('nutrition.saturatedFat')}
-                      unit="g"
-                      value={nutritionSaturatedFat}
-                      onChangeText={setNutritionSaturatedFat}
-                    />
+                  <View style={styles.nutritionValuesSection}>
+                    <View style={styles.nutritionSectionHeader}>
+                      <Text style={styles.nutritionSectionTitle}>Nutrition values</Text>
+                      <Text style={styles.nutritionSectionHint}>Editable before saving</Text>
+                    </View>
+                    <View style={styles.nutritionGrid}>
+                      <NutritionFactsField
+                        error={!isReviewNumberInRange(nutritionCalories, 0, 1000) ? 'Required' : null}
+                        label={t('nutrition.calories')}
+                        required
+                        unit="kcal"
+                        variant="full"
+                        value={nutritionCalories}
+                        onChangeText={setNutritionCalories}
+                      />
+                      <NutritionFactsField
+                        error={!isReviewNumberInRange(nutritionProtein, 0, 100) ? 'Required' : null}
+                        label={t('nutrition.protein')}
+                        required
+                        unit="g"
+                        value={nutritionProtein}
+                        onChangeText={setNutritionProtein}
+                      />
+                      <NutritionFactsField
+                        error={!isReviewNumberInRange(nutritionCarbs, 0, 100) ? 'Required' : null}
+                        label={t('nutrition.carbs')}
+                        required
+                        unit="g"
+                        value={nutritionCarbs}
+                        onChangeText={setNutritionCarbs}
+                      />
+                      <NutritionFactsField
+                        error={!isReviewNumberInRange(nutritionFat, 0, 100) ? 'Required' : null}
+                        label={t('nutrition.fat')}
+                        required
+                        unit="g"
+                        value={nutritionFat}
+                        onChangeText={setNutritionFat}
+                      />
+                      <NutritionFactsField label={t('nutrition.sugar')} unit="g" value={nutritionSugar} onChangeText={setNutritionSugar} />
+                      <NutritionFactsField label={t('nutrition.salt')} unit="g" value={nutritionSalt} onChangeText={setNutritionSalt} />
+                      <NutritionFactsField
+                        label={t('nutrition.saturatedFat')}
+                        unit="g"
+                        value={nutritionSaturatedFat}
+                        onChangeText={setNutritionSaturatedFat}
+                      />
+                    </View>
                   </View>
 
                   <View style={styles.nutritionSectionCard}>
-                    <Text style={styles.nutritionSectionTitle}>{t('nutrition.servingBasis')}</Text>
+                    <View style={styles.nutritionSectionHeader}>
+                      <Text style={styles.nutritionSectionTitle}>{t('nutrition.servingBasis')}</Text>
+                      <Text style={styles.nutritionSectionHint}>Choose how these values are saved</Text>
+                    </View>
                     <View style={styles.nutritionSegment}>
                       {(['100g', '100ml', 'serving'] as NutritionServingBasis[]).map((basis) => {
                         const active = nutritionServingBasis === basis;
@@ -4504,19 +5228,15 @@ function ScanProductScreen({
                 </>
               ) : (
                 <>
-                  <View style={styles.nutritionFlowHeader}>
-                    <Pressable accessibilityRole="button" onPress={handleBackToBarcodeScan}>
-                      <Text style={styles.nutritionBackText}>{t('common.back')}</Text>
-                    </Pressable>
-                    <Text style={styles.nutritionFlowTitle}>Read nutrition label</Text>
-                    <Text style={styles.nutritionFlowSubtitle}>
-                      We couldn't read this product automatically.
-                    </Text>
-                  </View>
-
                   <View style={styles.nutritionImageCard}>
                     {nutritionFactsImageUri ? (
                       <Image source={{ uri: nutritionFactsImageUri }} style={styles.nutritionFactsImage} />
+                    ) : null}
+                    {nutritionFactsStep === 'loading' || isExtractingNutritionText ? (
+                      <View style={styles.nutritionReadingPill}>
+                        <Ionicons name="sparkles-outline" size={14} color="#FFFFFF" />
+                        <Text style={styles.nutritionReadingText}>Reading label...</Text>
+                      </View>
                     ) : null}
                     <Pressable
                       accessibilityRole="button"
@@ -4533,16 +5253,38 @@ function ScanProductScreen({
                     <View style={styles.nutritionInfoTextBlock}>
                       <Text style={styles.nutritionInfoTitle}>Manual entry needed</Text>
                       <Text style={styles.nutritionInfoBody}>
-                        OCR is not available in this build. You can add this food manually.
+                        {nutritionFactsStep === 'loading'
+                          ? 'We are extracting calories and macros from the captured label.'
+                          : nutritionFactsOcrMessage ?? 'You can retake the label photo or add this food manually.'}
                       </Text>
                     </View>
                   </View>
 
+                  {nutritionFactsStep !== 'loading' ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={!nutritionFactsImageUri || isExtractingNutritionText}
+                      onPress={() => {
+                        if (nutritionFactsImageUri) {
+                          void onNutritionLabelImageSelected(nutritionFactsImageUri);
+                        }
+                      }}
+                      style={({ pressed }) => [
+                        styles.nutritionGhostButton,
+                        (!nutritionFactsImageUri || isExtractingNutritionText) && styles.buttonDisabled,
+                        pressed && styles.buttonPressed,
+                      ]}>
+                      <Text style={styles.nutritionGhostText}>Try again</Text>
+                    </Pressable>
+                  ) : null}
+
                   <Pressable
                     accessibilityRole="button"
+                    disabled={nutritionFactsStep === 'loading' || isExtractingNutritionText}
                     onPress={onFillNutritionFactsManually}
                     style={({ pressed }) => [
                       styles.nutritionPrimaryButton,
+                      (nutritionFactsStep === 'loading' || isExtractingNutritionText) && styles.buttonDisabled,
                       pressed && styles.buttonPressed,
                     ]}>
                     <Text style={styles.nutritionPrimaryText}>Add my food manually</Text>
@@ -4563,8 +5305,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   listContent: {
-    gap: 12,
-    paddingBottom: 140,
+    gap: 14,
+    paddingBottom: 156,
   },
   searchHeader: {
     gap: 16,
@@ -4578,34 +5320,34 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   addHubStack: {
-    gap: 14,
+    gap: 18,
   },
   addIntroCard: {
     zIndex: 5,
-    gap: 12,
-    borderRadius: 20,
-    backgroundColor: '#FFFFFF',
-    padding: 16,
+    gap: 15,
+    borderRadius: 24,
+    backgroundColor: '#FFFDF7',
+    padding: 18,
     shadowColor: '#1E1F24',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.04,
-    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.035,
+    shadowRadius: 18,
     elevation: 1,
   },
   addSectionCard: {
     gap: 12,
-    borderRadius: 18,
-    backgroundColor: '#FFFFFF',
-    padding: 14,
+    borderRadius: 0,
+    backgroundColor: 'transparent',
+    padding: 0,
     shadowColor: '#1E1F24',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.035,
-    shadowRadius: 16,
-    elevation: 1,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    elevation: 0,
   },
   categoryBlock: {
-    gap: 12,
-    paddingTop: 2,
+    gap: 10,
+    paddingTop: 4,
   },
   addHubHeader: {
     gap: 18,
@@ -4619,7 +5361,7 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   addHubTitleGroup: {
-    gap: 3,
+    gap: 4,
   },
   addHubSearchInput: {
     minHeight: 56,
@@ -4629,13 +5371,13 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   searchLauncher: {
-    minHeight: 50,
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     borderWidth: 1,
     borderRadius: 16,
-    paddingHorizontal: 14,
+    paddingHorizontal: 15,
   },
   searchLauncherText: {
     flex: 1,
@@ -4652,7 +5394,7 @@ const styles = StyleSheet.create({
   },
   quickActionGridCard: {
     width: '48%',
-    minHeight: 86,
+    minHeight: 96,
   },
   aiDescriptionInput: {
     minHeight: 116,
@@ -4747,6 +5489,9 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     textAlignVertical: 'top',
   },
+  mealComposerInputCompact: {
+    minHeight: 72,
+  },
   mealComposerFooter: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -4768,6 +5513,13 @@ const styles = StyleSheet.create({
   mealComposerCount: {
     fontSize: 12,
     fontWeight: '800',
+  },
+  customAiComposerHint: {
+    marginTop: -8,
+    paddingHorizontal: 2,
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 18,
   },
   buildMealHelperChips: {
     flexDirection: 'row',
@@ -4878,6 +5630,167 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
     lineHeight: 18,
+  },
+  aiFoodResultPanel: {
+    gap: 16,
+    borderRadius: 24,
+    padding: 16,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.06,
+    shadowRadius: 22,
+    elevation: 2,
+  },
+  aiFoodResultBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+  },
+  aiFoodResultBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  aiFoodResultBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  aiFoodProviderPill: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  aiFoodProviderText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  aiFoodConfidencePill: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  aiFoodConfidenceText: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  aiFoodResultMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 14,
+  },
+  aiFoodNameBlock: {
+    flex: 1,
+    gap: 3,
+    minWidth: 0,
+  },
+  aiFoodResultName: {
+    fontSize: 24,
+    fontWeight: '900',
+    lineHeight: 30,
+  },
+  aiFoodResultAltName: {
+    fontSize: 14,
+    fontWeight: '800',
+    lineHeight: 19,
+  },
+  aiFoodServingText: {
+    marginTop: 3,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  aiFoodCaloriesBadge: {
+    minWidth: 82,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  aiFoodCaloriesValue: {
+    fontSize: 28,
+    fontWeight: '900',
+    lineHeight: 32,
+  },
+  aiFoodCaloriesLabel: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  aiFoodMacroRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  aiFoodMacroPill: {
+    minHeight: 42,
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 14,
+    paddingHorizontal: 8,
+  },
+  aiFoodMacroLabel: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  aiFoodMacroValue: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  aiFoodReviewNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  aiFoodReviewNoteText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  aiFoodResultActions: {
+    gap: 10,
+  },
+  aiFoodUseButton: {
+    minHeight: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 17,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.16,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  aiFoodUseButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  aiFoodEditButton: {
+    minHeight: 50,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 16,
+  },
+  aiFoodEditButtonText: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  hiddenLegacyResult: {
+    display: 'none',
   },
   secondaryActionRow: {
     flexDirection: 'row',
@@ -5045,50 +5958,55 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scanFixedHeader: {
-    gap: 10,
-    paddingBottom: 14,
+    gap: 12,
+    paddingTop: 2,
+    paddingBottom: 18,
   },
   scanHeaderTopRow: {
-    minHeight: 34,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
   },
   scanBackButton: {
-    minHeight: 34,
+    minHeight: 36,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 5,
     borderRadius: 999,
-    paddingRight: 10,
+    paddingRight: 12,
   },
   scanBackText: {
     fontSize: 13,
     fontWeight: '900',
   },
   scanTokenPill: {
-    minHeight: 32,
+    minHeight: 34,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     borderRadius: 999,
     paddingHorizontal: 12,
   },
+  scanTokenPillPressed: {
+    opacity: 0.85,
+  },
   scanTokenText: {
     fontSize: 12,
     fontWeight: '900',
   },
   scanHeaderTextBlock: {
-    gap: 4,
+    gap: 5,
   },
   scanHeaderTitle: {
-    fontSize: 28,
+    fontSize: 29,
     fontWeight: '900',
     letterSpacing: 0,
+    lineHeight: 34,
   },
   scanHeaderSubtitle: {
-    maxWidth: 330,
+    maxWidth: 360,
     fontSize: 14,
     fontWeight: '700',
     lineHeight: 20,
@@ -5258,6 +6176,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '900',
   },
+  tokenInlineButton: {
+    alignSelf: 'flex-start',
+    borderRadius: 999,
+  },
   mealNameCard: {
     gap: 4,
     borderRadius: 8,
@@ -5342,7 +6264,7 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
   },
   nutritionFlowHeader: {
-    gap: 5,
+    gap: 8,
   },
   nutritionBackText: {
     alignSelf: 'flex-start',
@@ -5385,18 +6307,47 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
   },
+  nutritionReadingPill: {
+    position: 'absolute',
+    right: 16,
+    bottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(17,24,39,0.72)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  nutritionReadingText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '900',
+  },
   nutritionSectionCard: {
-    gap: 7,
+    gap: 12,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 18,
+    borderColor: '#E8ECE8',
+    borderRadius: 22,
     backgroundColor: '#FFFFFF',
-    padding: 14,
+    padding: 16,
+  },
+  nutritionValuesSection: {
+    gap: 12,
+  },
+  nutritionSectionHeader: {
+    gap: 3,
   },
   nutritionSectionTitle: {
     color: '#111827',
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '900',
+  },
+  nutritionSectionHint: {
+    color: '#6B7280',
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 17,
   },
   nutritionHelpText: {
     color: '#6B7280',
@@ -5423,17 +6374,22 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
   nutritionPrimaryButton: {
-    minHeight: 52,
+    minHeight: 56,
     width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 16,
+    borderRadius: 18,
     backgroundColor: '#2563EB',
     paddingHorizontal: 14,
+    shadowColor: '#2563EB',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 3,
   },
   nutritionPrimaryText: {
     color: '#FFFFFF',
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '900',
   },
   nutritionTextButton: {
@@ -5480,24 +6436,28 @@ const styles = StyleSheet.create({
   },
   nutritionSummaryCard: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 14,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 20,
+    borderWidth: 0,
+    borderRadius: 22,
     backgroundColor: '#FFFFFF',
-    padding: 12,
+    padding: 14,
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04,
+    shadowRadius: 16,
+    elevation: 1,
   },
   nutritionThumbnail: {
-    width: 72,
-    height: 72,
-    borderRadius: 16,
+    width: 76,
+    height: 76,
+    borderRadius: 18,
     backgroundColor: '#F3F4F6',
   },
   nutritionThumbnailPlaceholder: {
-    width: 72,
-    height: 72,
-    borderRadius: 16,
+    width: 76,
+    height: 76,
+    borderRadius: 18,
     backgroundColor: '#F3F4F6',
   },
   nutritionSummaryText: {
@@ -5506,14 +6466,14 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   nutritionNameInput: {
-    minHeight: 42,
+    minHeight: 44,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 14,
-    backgroundColor: '#F9FAFB',
+    borderColor: '#E8ECE8',
+    borderRadius: 16,
+    backgroundColor: '#FAFBF8',
     color: '#111827',
     paddingHorizontal: 12,
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '900',
   },
   nutritionBarcodeText: {
@@ -5527,16 +6487,17 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   nutritionFieldCard: {
-    gap: 10,
+    minHeight: 112,
+    gap: 11,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 18,
+    borderColor: '#E7EBE7',
+    borderRadius: 20,
     backgroundColor: '#FFFFFF',
-    padding: 12,
+    padding: 14,
   },
   nutritionFieldCardError: {
-    borderColor: '#D97706',
-    backgroundColor: '#FFFBEB',
+    borderColor: '#F4C983',
+    backgroundColor: '#FFF9EC',
   },
   nutritionFieldFull: {
     width: '100%',
@@ -5562,18 +6523,23 @@ const styles = StyleSheet.create({
     padding: 0,
   },
   nutritionInputRow: {
-    minHeight: 46,
+    minHeight: 50,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    borderRadius: 14,
-    backgroundColor: '#F9FAFB',
-    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: '#F8FAF8',
+    paddingHorizontal: 13,
   },
   nutritionRequiredBadge: {
-    color: '#B45309',
+    overflow: 'hidden',
+    borderRadius: 999,
+    backgroundColor: '#FFF2D9',
+    color: '#A16207',
     fontSize: 10,
     fontWeight: '900',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
   },
   nutritionUnitText: {
     color: '#6B7280',
@@ -5581,29 +6547,41 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   nutritionInlineWarning: {
-    color: '#B45309',
+    borderRadius: 14,
+    backgroundColor: '#FFF8EA',
+    color: '#9A5A12',
     fontSize: 12,
     fontWeight: '800',
     lineHeight: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
   nutritionSegment: {
     flexDirection: 'row',
-    gap: 8,
+    gap: 6,
+    borderRadius: 18,
+    backgroundColor: '#F3F6F3',
+    padding: 5,
   },
   nutritionSegmentButton: {
-    minHeight: 40,
+    minHeight: 42,
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderWidth: 0,
+    borderColor: 'transparent',
     borderRadius: 999,
-    backgroundColor: '#F9FAFB',
-    paddingHorizontal: 6,
+    backgroundColor: 'transparent',
+    paddingHorizontal: 5,
   },
   nutritionSegmentButtonActive: {
-    borderColor: '#2563EB',
-    backgroundColor: '#EFF6FF',
+    borderColor: 'transparent',
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
   },
   nutritionSegmentText: {
     color: '#6B7280',
@@ -5614,23 +6592,28 @@ const styles = StyleSheet.create({
     color: '#2563EB',
   },
   nutritionActionBar: {
-    gap: 10,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 20,
+    gap: 12,
+    borderWidth: 0,
+    borderColor: 'transparent',
+    borderRadius: 22,
     backgroundColor: '#FFFFFF',
-    padding: 8,
+    padding: 10,
+    shadowColor: '#111827',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.05,
+    shadowRadius: 18,
+    elevation: 2,
   },
   nutritionSecondaryActions: {
     flexDirection: 'row',
-    gap: 8,
+    gap: 10,
   },
   nutritionGhostButton: {
-    minHeight: 46,
+    minHeight: 48,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 14,
-    backgroundColor: '#F3F4F6',
+    borderRadius: 16,
+    backgroundColor: '#F3F6F3',
     paddingHorizontal: 12,
   },
   nutritionGhostText: {
@@ -5649,12 +6632,12 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   categoryRow: {
-    gap: 8,
-    paddingRight: 42,
+    gap: 10,
+    paddingRight: 38,
   },
   categorySection: {
     position: 'relative',
-    marginTop: -2,
+    marginTop: 0,
   },
   detachedCategorySection: {
     display: 'none',
@@ -5663,25 +6646,25 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 0,
     right: 0,
-    width: 32,
-    height: 36,
+    width: 30,
+    height: 40,
     alignItems: 'flex-end',
     justifyContent: 'center',
     paddingRight: 2,
   },
   categoryMoreHintText: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '900',
   },
   categoryButton: {
-    minHeight: 38,
+    minHeight: 40,
     justifyContent: 'center',
     borderRadius: 999,
     backgroundColor: '#F1F3EF',
-    paddingHorizontal: 14,
+    paddingHorizontal: 15,
   },
   categoryButtonSelected: {
-    backgroundColor: '#2563eb',
+    backgroundColor: '#2E7D57',
   },
   categoryButtonText: {
     color: '#6B6F76',
@@ -5693,8 +6676,10 @@ const styles = StyleSheet.create({
   },
   resultsTitle: {
     color: '#1E1F24',
-    fontSize: 16,
+    fontSize: 12,
     fontWeight: '900',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
   },
   foodResult: {
     flexDirection: 'row',
@@ -5812,6 +6797,83 @@ const styles = StyleSheet.create({
   cameraDimOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(3,10,8,0.24)',
+  },
+  barcodeCameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  barcodeFrame: {
+    width: '84%',
+    height: 150,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.55)',
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.025)',
+  },
+  barcodeFrameCorner: {
+    position: 'absolute',
+    width: 34,
+    height: 34,
+    borderColor: 'rgba(255,255,255,0.72)',
+  },
+  barcodeCornerTopLeft: {
+    top: -1,
+    left: -1,
+    borderTopWidth: 2,
+    borderLeftWidth: 2,
+    borderTopLeftRadius: 20,
+  },
+  barcodeCornerTopRight: {
+    top: -1,
+    right: -1,
+    borderTopWidth: 2,
+    borderRightWidth: 2,
+    borderTopRightRadius: 20,
+  },
+  barcodeCornerBottomLeft: {
+    bottom: -1,
+    left: -1,
+    borderBottomWidth: 2,
+    borderLeftWidth: 2,
+    borderBottomLeftRadius: 20,
+  },
+  barcodeCornerBottomRight: {
+    right: -1,
+    bottom: -1,
+    borderRightWidth: 2,
+    borderBottomWidth: 2,
+    borderBottomRightRadius: 20,
+  },
+  barcodePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  barcodePillText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  barcodeHelperText: {
+    position: 'absolute',
+    right: 24,
+    bottom: 24,
+    left: 24,
+    color: 'rgba(255,255,255,0.88)',
+    fontSize: 13,
+    fontWeight: '800',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
   nutritionCameraOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -5972,6 +7034,144 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#F8EDE9',
     padding: 14,
+  },
+  scanFallbackPanel: {
+    gap: 14,
+    borderRadius: 24,
+    padding: 18,
+  },
+  scanFallbackHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  scanFallbackIcon: {
+    width: 46,
+    height: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 16,
+  },
+  scanFallbackTextBlock: {
+    flex: 1,
+    gap: 3,
+  },
+  scanFallbackBadge: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+  },
+  scanFallbackTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    lineHeight: 25,
+  },
+  scanFallbackProductName: {
+    fontSize: 16,
+    fontWeight: '900',
+    lineHeight: 22,
+  },
+  scanFallbackSubtitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  nutritionReviewTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  nutritionReviewTitleBlock: {
+    flex: 1,
+    gap: 4,
+  },
+  nutritionSourcePill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 999,
+    backgroundColor: '#EAF7EF',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  nutritionSourcePillText: {
+    color: '#2E7D57',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  scanBarcodePill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  scanBarcodePillText: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  scanFallbackReason: {
+    gap: 4,
+    borderRadius: 16,
+    padding: 12,
+  },
+  scanFallbackReasonTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  scanFallbackReasonText: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  scanFallbackActions: {
+    gap: 12,
+    paddingTop: 2,
+  },
+  scanPrimaryAction: {
+    minHeight: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 9,
+    borderRadius: 16,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 3,
+  },
+  scanPrimaryActionText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  scanSecondaryAction: {
+    minHeight: 50,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 15,
+  },
+  scanSecondaryActionText: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  scanTertiaryAction: {
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 15,
+  },
+  scanTertiaryActionText: {
+    fontSize: 14,
+    fontWeight: '900',
   },
   ingredientResult: {
     gap: 5,

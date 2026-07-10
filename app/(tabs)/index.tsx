@@ -824,22 +824,21 @@ function TokenPill({
   }, [pulse, tokenBalance]);
 
   return (
-    <Animated.View style={[styles.tokenBar, isDark && darkStyles.tokenBar, { transform: [{ scale: pulse }] }]}>
+    <Pressable
+      accessibilityLabel={`Buy tokens. Current balance ${tokenBalance} tokens.`}
+      accessibilityRole="button"
+      onPress={() => router.push({ pathname: "/settings", params: { panel: "tokens" } })}
+      style={({ pressed }) => [pressed && styles.tokenPillPressed]}
+    >
+      <Animated.View style={[styles.tokenBar, isDark && darkStyles.tokenBar, { transform: [{ scale: pulse }] }]}>
       <Text style={[styles.tokenText, isDark && darkStyles.tokenText]}>
         {t("today.tokens", { count: tokenBalance })}
       </Text>
-      <Pressable
-        accessibilityLabel="Get more tokens"
-        accessibilityRole="button"
-        onPress={() => router.push("/settings")}
-        style={({ pressed }) => [
-          styles.tokenButton,
-          pressed && styles.tokenButtonPressed,
-        ]}
-      >
+      <View style={styles.tokenButton}>
         <Text style={styles.tokenButtonText}>+</Text>
-      </Pressable>
-    </Animated.View>
+      </View>
+      </Animated.View>
+    </Pressable>
   );
 }
 
@@ -2053,6 +2052,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#F7FAFF",
     paddingLeft: 12,
     paddingRight: 4,
+  },
+  tokenPillPressed: {
+    opacity: 0.85,
   },
   tokenText: {
     color: "#1E1F24",

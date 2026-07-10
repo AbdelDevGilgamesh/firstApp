@@ -60,7 +60,7 @@ export function FoodBrowseCard({
 }: FoodBrowseCardProps) {
   const theme = useAppTheme();
   const calorieColor = theme.isDark ? '#86EFAC' : '#2F7D5C';
-  const cardBackground = theme.isDark ? theme.card : '#FFFDF8';
+  const cardBackground = theme.isDark ? theme.card : '#FFFDF7';
   const iconTint = theme.isDark ? '#20304A' : '#EEF4FF';
 
   return (
@@ -72,7 +72,7 @@ export function FoodBrowseCard({
         styles.card,
         {
           backgroundColor: cardBackground,
-          borderColor: theme.isDark ? theme.cardBorder : '#F0EEE6',
+          borderColor: theme.isDark ? theme.cardBorder : '#F3F1EA',
           shadowColor: theme.shadow,
         },
       ]}>
@@ -144,18 +144,18 @@ const styles = StyleSheet.create({
     minHeight: 104,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 13,
     borderWidth: 1,
     borderRadius: 18,
     padding: 13,
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.06,
-    shadowRadius: 20,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.035,
+    shadowRadius: 14,
+    elevation: 1,
   },
   iconTile: {
-    width: 48,
-    height: 48,
+    width: 50,
+    height: 50,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 16,
@@ -179,12 +179,12 @@ const styles = StyleSheet.create({
   macroRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 5,
   },
   macroPill: {
     borderRadius: 999,
     paddingHorizontal: 7,
-    paddingVertical: 4,
+    paddingVertical: 3,
   },
   macroPillText: {
     fontSize: 11,
@@ -193,7 +193,7 @@ const styles = StyleSheet.create({
   trailing: {
     width: 68,
     alignItems: 'flex-end',
-    gap: 10,
+    gap: 11,
   },
   calorieBlock: {
     alignItems: 'flex-end',
@@ -228,8 +228,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 17,
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
-    elevation: 3,
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 2,
   },
 });

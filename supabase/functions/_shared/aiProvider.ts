@@ -4,6 +4,7 @@ import {
   GEMINI_MODEL,
   isQuotaErrorText,
   isTemporaryUnavailableErrorText,
+  normalizeGeminiModelName,
   normalizeConfidence,
   normalizeNotes,
   round,
@@ -13,9 +14,14 @@ import {
 
 type AiProvider = 'gemini' | 'openrouter' | 'groq' | 'demo';
 type EstimateKind = 'meal' | 'food';
+type GenerateFoodAutofillOptions = {
+  model?: string;
+  fallbackModels?: string[];
+};
 
 const DEFAULT_OPENROUTER_MODEL = 'meta-llama/llama-3.1-8b-instruct:free';
 const DEFAULT_GROQ_MODEL = 'llama-3.1-8b-instant';
+const DEFAULT_AI_FOOD_AUTOFILL_MODEL = 'gemini-3.1-flash-lite';
 
 function getProviderModel(provider: AiProvider) {
   if (provider === 'demo') {
@@ -33,11 +39,35 @@ function getProviderModel(provider: AiProvider) {
   return Deno.env.get('GROQ_MODEL') || DEFAULT_GROQ_MODEL;
 }
 
+function getAiFoodAutofillGeminiModel(model?: string) {
+  const explicitModel = normalizeGeminiModelName(model, '');
+
+  if (explicitModel) {
+    return explicitModel;
+  }
+
+  const configuredModel = normalizeGeminiModelName(Deno.env.get('AI_FOOD_AUTOFILL_MODEL'), '');
+
+  if (
+    configuredModel &&
+    configuredModel !== 'gemini-2.5-flash' &&
+    configuredModel !== 'gemini-2.5-flash-lite'
+  ) {
+    return configuredModel;
+  }
+
+  return DEFAULT_AI_FOOD_AUTOFILL_MODEL;
+}
+
 function withProviderMetadata<T extends Record<string, unknown>>(estimate: T, provider: AiProvider) {
+  const model = typeof estimate.model === 'string' && estimate.model.trim()
+    ? estimate.model.trim()
+    : getProviderModel(provider);
+
   return {
     ...estimate,
     provider,
-    model: getProviderModel(provider),
+    model,
     isDemo: provider === 'demo',
   };
 }
@@ -214,9 +244,22 @@ async function callOpenAiCompatibleJson(params: {
   return parseJsonText(content, provider);
 }
 
-async function callProviderJson(kind: EstimateKind, prompt: string, provider: Exclude<AiProvider, 'demo'>) {
+async function callProviderJson(
+  kind: EstimateKind,
+  prompt: string,
+  provider: Exclude<AiProvider, 'demo'>,
+  options: GenerateFoodAutofillOptions = {},
+) {
   if (provider === 'gemini') {
-    return callGeminiJson(prompt, kind === 'meal' ? mealEstimateSchema : foodEstimateSchema);
+    const model = kind === 'food' ? getAiFoodAutofillGeminiModel(options.model) : GEMINI_MODEL;
+    console.log('[AI Autofill] Provider used:', 'gemini', model);
+    return callGeminiJson(prompt, kind === 'meal' ? mealEstimateSchema : foodEstimateSchema, model, {
+      includeResponseSchema: kind !== 'food',
+      fallbackModels: kind === 'food' ? options.fallbackModels : undefined,
+      maxOutputTokens: kind === 'food' ? 320 : undefined,
+      timeoutMs: kind === 'food' ? 12_000 : undefined,
+      retryTemporaryUnavailable: kind === 'food',
+    });
   }
 
   if (provider === 'openrouter') {
@@ -265,13 +308,11 @@ function getMealPrompt(description: string) {
 
 function getFoodPrompt(description: string) {
   return [
-    'Estimate nutrition for one reusable custom food from the user description.',
-    'Return JSON with this shape:',
-    '{"name":"string","servingSize":"string","calories":number,"protein":number,"carbs":number,"fat":number,"sugar":number,"salt":number,"confidence":"low|medium","notes":["string"]}',
-    'Use a clear servingSize such as "100 g", "1 serving", or "1 sandwich".',
-    'Values must be calories and grams for protein, carbs, fat, sugar, and salt when available.',
-    'Keep confidence as low or medium. Never claim exactness. The user will review before saving.',
-    `Food description: ${description}`,
+    'Estimate one food from this description.',
+    'Return compact JSON only. No markdown.',
+    'Shape: {"name":"string","servingSize":"string","calories":number,"protein":number,"carbs":number,"fat":number,"sugar":number,"salt":number,"confidence":"low|medium","notes":["short"]}',
+    'Use realistic nutrition for the serving. Use grams for macros. Keep notes empty or max 1 short note.',
+    `Description: ${description}`,
   ].join('\n');
 }
 
@@ -316,6 +357,7 @@ function normalizeMealEstimate(payload: unknown, description: string) {
     { calories: 0, protein: 0, carbs: 0, fat: 0 },
   );
   const mealName = typeof estimate.mealName === 'string' ? estimate.mealName.trim() : '';
+  const model = typeof estimate.model === 'string' && estimate.model.trim() ? estimate.model.trim() : undefined;
 
   return {
     mealName: mealName || description.slice(0, 48) || 'AI estimated meal',
@@ -328,6 +370,7 @@ function normalizeMealEstimate(payload: unknown, description: string) {
     notes: normalizeNotes(estimate.notes).length
       ? normalizeNotes(estimate.notes)
       : ['Approximate estimate from your description.', 'Review portions before saving.'],
+    ...(model ? { model } : {}),
   };
 }
 
@@ -346,6 +389,7 @@ function normalizeFoodEstimate(payload: unknown, description: string) {
 
   const sugar = toOptionalNumber(estimate.sugar);
   const salt = toOptionalNumber(estimate.salt);
+  const model = typeof estimate.model === 'string' && estimate.model.trim() ? estimate.model.trim() : undefined;
 
   return {
     name: name || description.slice(0, 50) || 'AI estimated food',
@@ -363,6 +407,7 @@ function normalizeFoodEstimate(payload: unknown, description: string) {
     notes: normalizeNotes(estimate.notes).length
       ? normalizeNotes(estimate.notes)
       : ['Approximate estimate from your description.', 'Edit nutrition values before saving.'],
+    ...(model ? { model } : {}),
   };
 }
 
@@ -431,11 +476,11 @@ export async function generateMealEstimate(description: string) {
   return withProviderMetadata(normalizeMealEstimate(rawEstimate, description), provider);
 }
 
-export async function generateFoodAutofill(description: string) {
+export async function generateFoodAutofill(description: string, options: GenerateFoodAutofillOptions = {}) {
   const provider = getProvider();
   const rawEstimate =
     provider === 'demo'
       ? (console.log('[AI Provider] Using demo provider', { kind: 'food' }), getDemoFoodEstimate())
-      : await callProviderJson('food', getFoodPrompt(description), provider);
+      : await callProviderJson('food', getFoodPrompt(description), provider, options);
   return withProviderMetadata(normalizeFoodEstimate(rawEstimate, description), provider);
 }

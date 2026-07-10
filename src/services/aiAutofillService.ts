@@ -44,13 +44,20 @@ export type AiFoodEstimate = AiAutofillMetadata & {
 };
 
 type AiFunctionName = 'ai-meal-estimate' | 'ai-food-autofill';
-type AiAutofillErrorCode = 'AI_QUOTA_EXCEEDED' | 'AI_TEMPORARILY_UNAVAILABLE';
+type AiAutofillErrorCode = 'AI_QUOTA_EXCEEDED' | 'AI_TEMPORARILY_UNAVAILABLE' | 'AI_MODEL_UNAVAILABLE';
 type SupabaseFunctionError = Error & {
   context?: unknown;
 };
 type FunctionErrorBody = {
   error?: string;
   code?: string;
+  debug?: {
+    model?: string;
+    status?: number;
+    errorStatus?: string | null;
+    errorCode?: number | null;
+    errorMessage?: string | null;
+  };
 };
 
 export class AiAutofillError extends Error {
@@ -69,6 +76,10 @@ export function isAiQuotaExceededError(error: unknown) {
 
 export function isAiTemporarilyUnavailableError(error: unknown) {
   return error instanceof AiAutofillError && error.code === 'AI_TEMPORARILY_UNAVAILABLE';
+}
+
+export function isAiModelUnavailableError(error: unknown) {
+  return error instanceof AiAutofillError && error.code === 'AI_MODEL_UNAVAILABLE';
 }
 
 function getSupabaseClient() {
@@ -245,7 +256,41 @@ function getFunctionErrorCode(responseBody: unknown) {
   return typeof body.code === 'string' ? body.code : null;
 }
 
-async function logFunctionInvokeError(
+function isModelUnavailableMessage(value: unknown) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes('model') &&
+    (normalized.includes('not available') ||
+      normalized.includes('unavailable') ||
+      normalized.includes('not found') ||
+      normalized.includes('not supported') ||
+      normalized.includes('please update your code'))
+  );
+}
+
+function getFunctionErrorMessage(responseBody: unknown) {
+  if (!responseBody || typeof responseBody !== 'object') {
+    return null;
+  }
+
+  const body = responseBody as FunctionErrorBody;
+  return typeof body.error === 'string' ? body.error : null;
+}
+
+function getFunctionErrorDebug(responseBody: unknown) {
+  if (!responseBody || typeof responseBody !== 'object') {
+    return null;
+  }
+
+  const body = responseBody as FunctionErrorBody;
+  return body.debug ?? null;
+}
+
+function logFunctionInvokeError(
   functionName: AiFunctionName,
   error: SupabaseFunctionError,
   responseBody: unknown,
@@ -254,14 +299,18 @@ async function logFunctionInvokeError(
     ? (error.context as Partial<Response>)
     : null;
 
-  console.error('[AI Autofill] Supabase function error', {
+  if (!__DEV__) {
+    return;
+  }
+
+  console.warn('[AI Autofill] failed', {
     functionName,
-    name: error.name,
-    message: error.message,
     status: context?.status,
-    statusText: context?.statusText,
-    responseBody,
-    context: error.context,
+    code: getFunctionErrorCode(responseBody),
+    model: getFunctionErrorDebug(responseBody)?.model,
+    errorStatus: getFunctionErrorDebug(responseBody)?.errorStatus,
+    errorCode: getFunctionErrorDebug(responseBody)?.errorCode,
+    errorMessage: getFunctionErrorDebug(responseBody)?.errorMessage,
   });
 }
 
@@ -280,26 +329,33 @@ async function invokeAiAutofillFunction(functionName: AiFunctionName, descriptio
   if (error) {
     const functionError = error as SupabaseFunctionError;
     const responseBody = await getFunctionErrorResponseBody(functionError);
-    await logFunctionInvokeError(functionName, functionError, responseBody);
+    logFunctionInvokeError(functionName, functionError, responseBody);
 
     const functionErrorCode = getFunctionErrorCode(responseBody);
+    const functionErrorMessage = getFunctionErrorMessage(responseBody);
 
     if (functionErrorCode === 'AI_QUOTA_EXCEEDED') {
-      const body = responseBody as FunctionErrorBody | null;
       const message =
-        body && typeof body.error === 'string'
-          ? body.error
-          : 'AI usage limit reached. Please try again later.';
+        functionErrorMessage ?? 'AI usage limit reached. Please try again later.';
       throw new AiAutofillError('AI_QUOTA_EXCEEDED', message);
     }
 
     if (functionErrorCode === 'AI_TEMPORARILY_UNAVAILABLE') {
-      const body = responseBody as FunctionErrorBody | null;
       const message =
-        body && typeof body.error === 'string'
-          ? body.error
-          : 'AI is busy right now. Please try again in a moment or add it manually.';
+        functionErrorMessage ?? 'AI is busy right now. Please try again in a moment or add it manually.';
       throw new AiAutofillError('AI_TEMPORARILY_UNAVAILABLE', message);
+    }
+
+    if (
+      functionErrorCode === 'AI_MODEL_UNAVAILABLE' ||
+      functionErrorCode === 'AI_PERMISSION_DENIED' ||
+      functionErrorCode === 'AI_BAD_REQUEST' ||
+      (functionErrorCode === 'GEMINI_ERROR' && isModelUnavailableMessage(functionErrorMessage))
+    ) {
+      throw new AiAutofillError(
+        'AI_MODEL_UNAVAILABLE',
+        'AI model is temporarily unavailable. Please try again later or add the food manually.',
+      );
     }
 
     throw error;

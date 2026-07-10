@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Dimensions, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAppTheme } from '@/src/theme/appTheme';
@@ -61,9 +61,8 @@ export function AppToast({
 }: AppToastProps) {
   const theme = useAppTheme();
   const insets = useSafeAreaInsets();
-  const screenWidth = Dimensions.get('window').width;
   const opacity = useRef(new Animated.Value(0)).current;
-  const translateX = useRef(new Animated.Value(-screenWidth)).current;
+  const translateY = useRef(new Animated.Value(-24)).current;
   const progressAnim = useRef(new Animated.Value(1)).current;
   const [isDismissed, setIsDismissed] = useState(false);
   const [shouldRender, setShouldRender] = useState(false);
@@ -79,9 +78,9 @@ export function AppToast({
 
   useEffect(() => {
     setIsDismissed(false);
-    translateX.setValue(-screenWidth);
+    translateY.setValue(-24);
     progressAnim.setValue(1);
-  }, [message, progressAnim, screenWidth, title, translateX, type]);
+  }, [message, progressAnim, title, translateY, type]);
 
   useEffect(() => {
     if (isVisible) {
@@ -97,10 +96,10 @@ export function AppToast({
         toValue: isVisible ? 1 : 0,
         useNativeDriver: true,
       }),
-      Animated.timing(translateX, {
+      Animated.timing(translateY, {
         duration: isVisible ? 300 : 220,
         easing: isVisible ? Easing.out(Easing.cubic) : Easing.in(Easing.cubic),
-        toValue: isVisible ? 0 : screenWidth * 0.4,
+        toValue: isVisible ? 0 : -24,
         useNativeDriver: true,
       }),
     ]).start(({ finished }) => {
@@ -108,7 +107,7 @@ export function AppToast({
         setShouldRender(false);
       }
     });
-  }, [isVisible, opacity, progressAnim, screenWidth, translateX]);
+  }, [isVisible, opacity, progressAnim, translateY]);
 
   function dismissToast() {
     if (dismissTimeoutRef.current) {
@@ -125,10 +124,10 @@ export function AppToast({
         toValue: 0,
         useNativeDriver: true,
       }),
-      Animated.timing(translateX, {
+      Animated.timing(translateY, {
         duration: 220,
         easing: Easing.in(Easing.cubic),
-        toValue: screenWidth * 0.4,
+        toValue: -24,
         useNativeDriver: true,
       }),
     ]).start(() => {
@@ -175,9 +174,11 @@ export function AppToast({
           styles.toastPositioner,
           {
             bottom: position === 'bottom' ? insets.bottom + 82 : undefined,
+            left: 16,
             opacity,
-            top: position === 'top' ? insets.top : undefined,
-            transform: [{ translateX }],
+            right: 16,
+            top: position === 'top' ? insets.top + 12 : undefined,
+            transform: [{ translateY }],
           },
         ]}>
         <View
@@ -187,7 +188,7 @@ export function AppToast({
             {
               backgroundColor,
               shadowColor: theme.shadow,
-              paddingTop: position === 'top' ? 10 : 12,
+              paddingTop: 12,
             },
           ]}>
           <View style={[styles.iconBubble, { backgroundColor: theme.isDark ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.72)' }]}>
@@ -240,8 +241,6 @@ const styles = StyleSheet.create({
   },
   toastPositioner: {
     position: 'absolute',
-    left: 0,
-    right: 0,
     zIndex: 9999,
     elevation: 999,
   },
@@ -251,8 +250,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     overflow: 'hidden',
-    borderBottomLeftRadius: 20,
-    borderBottomRightRadius: 20,
+    borderRadius: 20,
     paddingHorizontal: 16,
     paddingBottom: 10,
     shadowOffset: { width: 0, height: 8 },
@@ -262,16 +260,16 @@ const styles = StyleSheet.create({
   },
   progressTrack: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: 4,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    right: 16,
+    bottom: 6,
+    left: 16,
+    height: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.22)',
   },
   progressFill: {
     height: '100%',
-    borderTopRightRadius: 999,
-    borderBottomRightRadius: 999,
+    borderRadius: 999,
   },
   iconBubble: {
     width: 40,

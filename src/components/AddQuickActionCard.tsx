@@ -50,13 +50,15 @@ export function AddQuickActionCard({
         style={[
           styles.card,
           {
-            backgroundColor: theme.isDark ? theme.cardAlt : `${activeColor}0D`,
-            borderColor: `${activeColor}33`,
+            backgroundColor: theme.isDark ? theme.cardAlt : '#FFFDF7',
+            borderColor: theme.isDark ? theme.cardBorder : '#EEE8DA',
           },
         ]}>
-        <View style={[styles.accentBar, { backgroundColor: activeColor }]} />
-        <View style={[styles.iconCircle, { backgroundColor: `${activeColor}18` }]}>
-          <Ionicons color={activeColor} name={icon} size={20} />
+        <View style={[styles.accentLine, { backgroundColor: activeColor }]} />
+        <View style={styles.cardTopRow}>
+          <View style={[styles.iconCircle, { backgroundColor: `${activeColor}18` }]}>
+            <Ionicons color={activeColor} name={icon} size={20} />
+          </View>
         </View>
         <View style={styles.textGroup}>
           <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
@@ -74,29 +76,37 @@ export function AddQuickActionCard({
 const styles = StyleSheet.create({
   wrapper: {},
   card: {
-    minHeight: 84,
-    gap: 8,
+    minHeight: 96,
+    gap: 11,
     borderWidth: 1,
-    borderRadius: 15,
-    padding: 12,
+    borderRadius: 18,
+    overflow: 'hidden',
+    padding: 14,
+    paddingTop: 16,
   },
-  accentBar: {
-    width: 34,
-    height: 4,
-    borderRadius: 999,
+  accentLine: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    left: 0,
+    height: 3,
+  },
+  cardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   iconCircle: {
-    width: 34,
-    height: 34,
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 17,
+    borderRadius: 14,
   },
   textGroup: {
-    gap: 3,
+    gap: 4,
   },
   title: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '900',
   },
   subtitle: {

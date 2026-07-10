@@ -64,6 +64,7 @@ function ToastHost({ onDismiss, toast }: { onDismiss: () => void; toast: ActiveT
         key={toast?.id ?? 'empty-toast'}
         message={toast?.message}
         onDismiss={onDismiss}
+        position="top"
         title={toast?.title}
         type={toast?.type ?? 'info'}
         visible={Boolean(toast)}
