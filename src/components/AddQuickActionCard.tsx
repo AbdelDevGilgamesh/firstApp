@@ -43,17 +43,22 @@ export function AddQuickActionCard({
   });
 
   return (
-    <Animated.View style={[styles.wrapper, style, { opacity: entrance, transform: [{ translateY }] }]}>
+    <Animated.View
+      style={[
+        styles.wrapper,
+        {
+          backgroundColor: theme.card,
+          borderColor: theme.cardBorder,
+          borderRadius: theme.radii.large,
+          opacity: entrance,
+          transform: [{ translateY }],
+        },
+        style,
+      ]}>
       <PressableScale
         accessibilityRole="button"
         onPress={onPress}
-        style={[
-          styles.card,
-          {
-            backgroundColor: theme.isDark ? theme.cardAlt : '#FFFDF7',
-            borderColor: theme.isDark ? theme.cardBorder : '#EEE8DA',
-          },
-        ]}>
+        style={styles.card}>
         <View style={[styles.accentLine, { backgroundColor: activeColor }]} />
         <View style={styles.cardTopRow}>
           <View style={[styles.iconCircle, { backgroundColor: `${activeColor}18` }]}>
@@ -74,15 +79,15 @@ export function AddQuickActionCard({
 }
 
 const styles = StyleSheet.create({
-  wrapper: {},
-  card: {
-    minHeight: 96,
-    gap: 11,
-    borderWidth: 1,
-    borderRadius: 18,
+  wrapper: {
     overflow: 'hidden',
-    padding: 14,
-    paddingTop: 16,
+    borderWidth: 1,
+  },
+  card: {
+    minHeight: 98,
+    gap: 12,
+    padding: 15,
+    paddingTop: 17,
   },
   accentLine: {
     position: 'absolute',
@@ -96,11 +101,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   iconCircle: {
-    width: 40,
-    height: 40,
+    width: 42,
+    height: 42,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 14,
+    borderRadius: 15,
   },
   textGroup: {
     gap: 4,
@@ -108,9 +113,11 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 15,
     fontWeight: '900',
+    lineHeight: 19,
   },
   subtitle: {
     fontSize: 11,
     fontWeight: '800',
+    lineHeight: 15,
   },
 });

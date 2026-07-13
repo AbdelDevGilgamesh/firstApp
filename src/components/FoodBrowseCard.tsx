@@ -59,9 +59,8 @@ export function FoodBrowseCard({
   onToggleFavorite,
 }: FoodBrowseCardProps) {
   const theme = useAppTheme();
-  const calorieColor = theme.isDark ? '#86EFAC' : '#2F7D5C';
-  const cardBackground = theme.isDark ? theme.card : '#FFFDF7';
-  const iconTint = theme.isDark ? '#20304A' : '#EEF4FF';
+  const calorieColor = theme.success;
+  const iconTint = theme.primarySoft;
 
   return (
     <PressableScale
@@ -71,8 +70,8 @@ export function FoodBrowseCard({
       style={[
         styles.card,
         {
-          backgroundColor: cardBackground,
-          borderColor: theme.isDark ? theme.cardBorder : '#F3F1EA',
+          backgroundColor: theme.card,
+          borderColor: theme.cardBorder,
           shadowColor: theme.shadow,
         },
       ]}>
@@ -87,9 +86,9 @@ export function FoodBrowseCard({
           {food.unit}
         </Text>
         <View style={styles.macroRow}>
-          <MacroPill color="#2563EB" label="P" value={food.protein} />
-          <MacroPill color="#C96D1D" label="C" value={food.carbs} />
-          <MacroPill color="#9A6B12" label="F" value={food.fat} />
+          <MacroPill color={theme.primary} label="P" value={food.protein} />
+          <MacroPill color={theme.warning} label="C" value={food.carbs} />
+          <MacroPill color={theme.successDark} label="F" value={food.fat} />
         </View>
       </View>
 
@@ -112,12 +111,12 @@ export function FoodBrowseCard({
             style={[
               styles.favoriteButton,
               {
-                backgroundColor: isFavorite ? '#FEF3C7' : 'transparent',
-                borderColor: isFavorite ? '#F59E0B' : theme.cardBorder,
+                backgroundColor: isFavorite ? theme.warningSoft : 'transparent',
+                borderColor: isFavorite ? theme.warning : theme.cardBorder,
               },
             ]}>
             <Ionicons
-              color={isFavorite ? '#F59E0B' : theme.mutedText}
+              color={isFavorite ? theme.warning : theme.mutedText}
               name={isFavorite ? 'star' : 'star-outline'}
               size={18}
             />
@@ -144,21 +143,21 @@ const styles = StyleSheet.create({
     minHeight: 104,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 13,
+    gap: 14,
     borderWidth: 1,
-    borderRadius: 18,
-    padding: 13,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.035,
-    shadowRadius: 14,
+    borderRadius: 20,
+    padding: 14,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04,
+    shadowRadius: 18,
     elevation: 1,
   },
   iconTile: {
-    width: 50,
-    height: 50,
+    width: 52,
+    height: 52,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 16,
+    borderRadius: 17,
   },
   content: {
     flex: 1,
@@ -168,13 +167,13 @@ const styles = StyleSheet.create({
   name: {
     fontSize: 16,
     fontWeight: '900',
-    lineHeight: 20,
+    lineHeight: 21,
   },
   meta: {
     flexShrink: 0,
     fontSize: 12,
     fontWeight: '800',
-    lineHeight: 16,
+    lineHeight: 17,
   },
   macroRow: {
     flexDirection: 'row',
@@ -183,8 +182,8 @@ const styles = StyleSheet.create({
   },
   macroPill: {
     borderRadius: 999,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   macroPillText: {
     fontSize: 11,
@@ -214,16 +213,16 @@ const styles = StyleSheet.create({
     gap: 7,
   },
   favoriteButton: {
-    width: 32,
-    height: 32,
+    width: 34,
+    height: 34,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderRadius: 16,
   },
   addButton: {
-    width: 34,
-    height: 34,
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 17,

@@ -32,10 +32,10 @@ Default provider.
 ```bash
 supabase secrets set AI_PROVIDER=gemini
 supabase secrets set GEMINI_API_KEY=your_gemini_key
-supabase secrets set GEMINI_MODEL=gemini-2.0-flash-lite
+supabase secrets set GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
-If `GEMINI_MODEL` is not set, the function uses `gemini-2.0-flash-lite`.
+If `GEMINI_MODEL` is not set, the function uses `gemini-3.1-flash-lite`.
 
 ## OpenRouter
 

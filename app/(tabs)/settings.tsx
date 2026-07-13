@@ -1428,7 +1428,15 @@ function SettingsSection({ children, title }: { children: ReactNode; title: stri
   return (
     <View style={styles.settingsSection}>
       <Text style={[styles.settingsSectionTitle, { color: theme.mutedText }]}>{title}</Text>
-      <View style={[styles.settingsGroup, { backgroundColor: theme.card, shadowColor: theme.shadow }]}>
+      <View
+        style={[
+          styles.settingsGroup,
+          {
+            backgroundColor: theme.card,
+            borderColor: theme.cardBorder,
+            shadowColor: theme.shadow,
+          },
+        ]}>
         {children}
       </View>
     </View>
@@ -1667,7 +1675,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   settingsSection: {
-    gap: 8,
+    gap: 10,
   },
   settingsSectionTitle: {
     marginLeft: 4,
@@ -1678,26 +1686,27 @@ const styles = StyleSheet.create({
   },
   settingsGroup: {
     overflow: 'hidden',
-    borderRadius: 18,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.05,
-    shadowRadius: 14,
+    borderWidth: 1,
+    borderRadius: 22,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.045,
+    shadowRadius: 18,
     elevation: 1,
   },
   settingsRow: {
-    minHeight: 58,
+    minHeight: 62,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
   settingsIconBubble: {
-    width: 34,
-    height: 34,
+    width: 38,
+    height: 38,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 11,
+    borderRadius: 14,
   },
   settingsIconText: {
     fontSize: 15,
@@ -1722,11 +1731,11 @@ const styles = StyleSheet.create({
   card: {
     gap: 18,
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 24,
     padding: 20,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.06,
-    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.045,
+    shadowRadius: 20,
     elevation: 2,
   },
   sectionTitle: {

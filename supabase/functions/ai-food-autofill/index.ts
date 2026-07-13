@@ -12,9 +12,7 @@ import {
 
 const AI_FOOD_MODEL_PRIORITY = [
   'gemini-3.1-flash-lite',
-  'gemini-3-flash',
   'gemini-3.5-flash',
-  'gemini-flash-latest',
 ];
 const AI_FOOD_AUTOFILL_DISCOVERY_FALLBACK_MODEL = AI_FOOD_MODEL_PRIORITY[0];
 const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -31,11 +29,7 @@ let cachedModelResolution: (ModelResolution & { expiresAt: number }) | null = nu
 function getConfiguredAiFoodAutofillModel() {
   const configuredModel = normalizeGeminiModelName(Deno.env.get('AI_FOOD_AUTOFILL_MODEL'), '');
 
-  if (
-    configuredModel &&
-    configuredModel !== 'gemini-2.5-flash' &&
-    configuredModel !== 'gemini-2.5-flash-lite'
-  ) {
+  if (configuredModel) {
     return configuredModel;
   }
 

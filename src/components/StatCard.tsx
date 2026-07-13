@@ -1,5 +1,7 @@
 import { StyleSheet, Text, View } from 'react-native';
 
+import { useAppTheme } from '@/src/theme/appTheme';
+
 type StatCardProps = {
   label: string;
   value: string;
@@ -7,10 +9,25 @@ type StatCardProps = {
 };
 
 export function StatCard({ label, value, tone = 'default' }: StatCardProps) {
+  const theme = useAppTheme();
+  const isFilled = tone !== 'default';
+  const backgroundColor =
+    tone === 'success' ? theme.success : tone === 'warning' ? theme.warning : theme.card;
+  const textColor = isFilled ? '#FFFFFF' : theme.text;
+  const labelColor = isFilled ? 'rgba(255,255,255,0.76)' : theme.mutedText;
+
   return (
-    <View style={[styles.card, styles[tone]]}>
-      <Text style={styles.label}>{label}</Text>
-      <Text style={styles.value}>{value}</Text>
+    <View
+      style={[
+        styles.card,
+        {
+          backgroundColor,
+          borderColor: isFilled ? 'transparent' : theme.cardBorder,
+          shadowColor: theme.shadow,
+        },
+      ]}>
+      <Text style={[styles.label, { color: labelColor }]}>{label}</Text>
+      <Text style={[styles.value, { color: textColor }]}>{value}</Text>
     </View>
   );
 }
@@ -20,26 +37,20 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 112,
     justifyContent: 'space-between',
-    borderRadius: 8,
+    borderWidth: 1,
+    borderRadius: 22,
     padding: 16,
-  },
-  default: {
-    backgroundColor: '#1E1F24',
-  },
-  success: {
-    backgroundColor: '#2E7D57',
-  },
-  warning: {
-    backgroundColor: '#B95C3A',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.05,
+    shadowRadius: 18,
+    elevation: 1,
   },
   label: {
-    color: 'rgba(255,255,255,0.72)',
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '800',
   },
   value: {
-    color: '#FFFFFF',
     fontSize: 28,
-    fontWeight: '800',
+    fontWeight: '900',
   },
 });

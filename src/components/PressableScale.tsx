@@ -12,6 +12,7 @@ type PressableScaleProps = PropsWithChildren<
     disabled?: boolean;
     scaleTo?: number;
     style?: StyleProp<ViewStyle> | ((state: { pressed: boolean }) => StyleProp<ViewStyle>);
+    wrapperStyle?: StyleProp<ViewStyle>;
   }
 >;
 
@@ -22,6 +23,7 @@ export function PressableScale({
   onPressOut,
   scaleTo = 0.97,
   style,
+  wrapperStyle,
   ...props
 }: PressableScaleProps) {
   const scale = useRef(new Animated.Value(1)).current;
@@ -53,7 +55,7 @@ export function PressableScale({
   }
 
   return (
-    <Animated.View style={{ opacity, transform: [{ scale }] }}>
+    <Animated.View style={[wrapperStyle, { opacity, transform: [{ scale }] }]}>
       <Pressable
         {...props}
         disabled={disabled}

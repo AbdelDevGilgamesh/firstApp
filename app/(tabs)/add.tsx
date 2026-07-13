@@ -1,16 +1,29 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import {
+  AudioModule,
+  RecordingOptions,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
+import * as Haptics from 'expo-haptics';
 import { BarcodeScanningResult, CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
+  ActivityIndicator,
   Alert,
+  AppState,
   FlatList,
   Image,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -26,6 +39,7 @@ import { FoodBrowseCard } from '@/src/components/FoodBrowseCard';
 import { MealPhotoEstimateCard } from '@/src/components/MealPhotoEstimateCard';
 import { ProductRatingCard } from '@/src/components/ProductRatingCard';
 import { SearchFoodBottomSheet } from '@/src/components/SearchFoodBottomSheet';
+import { useAppDialog } from '@/src/context/AppDialogContext';
 import { useCalories } from '@/src/context/CalorieContext';
 import { useLanguage } from '@/src/context/LanguageContext';
 import { useTokens } from '@/src/context/TokenContext';
@@ -36,7 +50,7 @@ import {
   mealToFoodDefinition,
   templateToFoodDefinition,
 } from '@/src/foods';
-import { MealIngredient, ServingPreset } from '@/src/types';
+import { MealIngredient, MealTemplate, ServingPreset } from '@/src/types';
 import { create as createScannedFood } from '@/src/services/scannedFoodsDbService';
 import { lookupBarcodeOnline, OnlineProductLookupProduct } from '@/src/services/productLookupService';
 import {
@@ -49,15 +63,18 @@ import {
   isAiTemporarilyUnavailableError,
 } from '@/src/services/aiAutofillService';
 import { NutritionVisionError, parseNutritionLabelImage } from '@/src/services/nutritionLabelVisionService';
+import {
+  estimateMealPhoto,
+  MealPhotoVisionError,
+  MealPhotoVisionEstimate,
+} from '@/src/services/mealPhotoVisionService';
+import {
+  MealVoiceTranscriptionError,
+  transcribeMealVoiceRecording,
+} from '@/src/services/mealVoiceTranscriptionService';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { normalizeText, searchFoods } from '@/src/utils/foodSearch';
-import {
-  MealPhotoCookingFat,
-  MealPhotoFoodType,
-  MealPhotoPortionSize,
-  MealPhotoSauce,
-  estimateMealFromPhoto,
-} from '@/src/utils/mealPhotoEstimate';
+import { MealPhotoEstimate } from '@/src/utils/mealPhotoEstimate';
 import { parseServingSize, scaleNutrition } from '@/src/utils/nutritionScaling';
 import { ParsedNutritionFacts, parseNutritionFactsText } from '@/src/utils/nutritionFactsParser';
 import { cropCameraImageToFrame } from '@/src/utils/cropCameraImageToFrame';
@@ -102,11 +119,59 @@ const DEFAULT_MEAL_LABELS = [
   'Before bed',
 ] as const;
 const CUSTOM_MEAL_LABEL = 'Custom';
+const MAX_VOICE_RECORDING_MS = 30_000;
+const MAX_AI_DESCRIPTION_LENGTH = 500;
+const MEAL_VOICE_RECORDING_OPTIONS: RecordingOptions = {
+  ...RecordingPresets.LOW_QUALITY,
+  isMeteringEnabled: true,
+};
 
-type AddMode = 'find' | 'meal' | 'scan' | 'mealPhoto' | 'mealAi' | 'customAi';
+type AddMode = 'find' | 'meal' | 'scan' | 'mealPhoto' | 'mealAi' | 'mealAiReview' | 'customAi';
 type NutritionFactsStep = 'idle' | 'loading' | 'manualPaste' | 'review' | 'error';
+type VoiceInputState = 'idle' | 'requestingPermission' | 'recording' | 'transcribing' | 'error';
 type ScanMode = 'barcode' | 'nutritionLabel';
 type ScanProductStep = 'barcodeScanner' | 'barcodeFallback' | 'nutritionFactsScanner' | 'nutritionReview';
+type EditableMealIngredient = {
+  id: string;
+  name: string;
+  quantity: number;
+  unit: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  sugar?: number | null;
+  salt?: number | null;
+  saturatedFat?: number | null;
+  fiber?: number | null;
+};
+type EditableMealDraft = {
+  title: string;
+  description: string;
+  ingredients: EditableMealIngredient[];
+  provider?: string | null;
+  model?: string | null;
+  confidence?: string;
+  isDemo?: boolean;
+};
+type EditableNutritionField = 'calories' | 'protein' | 'carbs' | 'fat' | 'sugar' | 'salt' | 'saturatedFat' | 'fiber';
+type IngredientEditDraft = {
+  baseline: EditableMealIngredient;
+  fields: {
+    name: string;
+    quantity: string;
+    unit: string;
+    calories: string;
+    protein: string;
+    carbs: string;
+    fat: string;
+    sugar: string;
+    salt: string;
+    saturatedFat: string;
+    fiber: string;
+  };
+  touched: Partial<Record<EditableNutritionField, boolean>>;
+};
 type BarcodeFallbackContext =
   | { type: 'incompleteProduct'; product: IncompleteScannedProduct }
   | { type: 'notFound'; barcode: string };
@@ -132,6 +197,31 @@ function toOptionalFormNumber(value: string) {
 function round(value: number, digits = 1) {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
+}
+
+function formatDraftNumber(value?: number | null) {
+  return value === null || value === undefined ? '' : String(round(value));
+}
+
+function parseDraftNumber(value: string) {
+  const parsed = Number(value.replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function calculateEditableMealTotals(ingredients: EditableMealIngredient[]) {
+  return ingredients.reduce(
+    (totals, ingredient) => ({
+      calories: totals.calories + ingredient.calories,
+      protein: round(totals.protein + ingredient.protein),
+      carbs: round(totals.carbs + ingredient.carbs),
+      fat: round(totals.fat + ingredient.fat),
+      sugar: round(totals.sugar + (ingredient.sugar ?? 0)),
+      salt: round(totals.salt + (ingredient.salt ?? 0)),
+      saturatedFat: round(totals.saturatedFat + (ingredient.saturatedFat ?? 0)),
+      fiber: round(totals.fiber + (ingredient.fiber ?? 0)),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0, sugar: 0, salt: 0, saturatedFat: 0, fiber: 0 },
+  );
 }
 
 function getDefaultMealLabel(date = new Date()) {
@@ -504,7 +594,8 @@ function mapOpenFoodFactsProduct(
 
 export default function AddFoodScreen() {
   const theme = useAppTheme();
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
+  const { showDialog } = useAppDialog();
   const { showToast } = useToast();
   const {
     addFood,
@@ -639,11 +730,10 @@ export default function AddFoodScreen() {
   const [manualAddReturnContext, setManualAddReturnContext] = useState<ManualAddReturnContext | null>(null);
   const [scanFallbackRestore, setScanFallbackRestore] = useState<ScanFallbackRestore | null>(null);
   const [mealPhotoUri, setMealPhotoUri] = useState<string | null>(null);
-  const [mealPhotoPortion, setMealPhotoPortion] = useState<MealPhotoPortionSize>('medium');
-  const [mealPhotoCookingFat, setMealPhotoCookingFat] = useState<MealPhotoCookingFat>('none');
-  const [mealPhotoSauce, setMealPhotoSauce] = useState<MealPhotoSauce>('none');
-  const [mealPhotoFoodType, setMealPhotoFoodType] = useState<MealPhotoFoodType>('mixed');
   const [mealPhotoEstimateVisible, setMealPhotoEstimateVisible] = useState(false);
+  const [mealPhotoAiEstimate, setMealPhotoAiEstimate] = useState<MealPhotoEstimate | null>(null);
+  const [isEstimatingMealPhoto, setIsEstimatingMealPhoto] = useState(false);
+  const [mealPhotoEstimateError, setMealPhotoEstimateError] = useState<string | null>(null);
   const [nutritionFactsBarcode, setNutritionFactsBarcode] = useState<string | null>(null);
   const [nutritionFactsImageUri, setNutritionFactsImageUri] = useState<string | null>(null);
   const [nutritionFactsText, setNutritionFactsText] = useState('');
@@ -664,17 +754,26 @@ export default function AddFoodScreen() {
   const [nutritionServingBasis, setNutritionServingBasis] = useState<NutritionServingBasis>('100g');
   const [aiDescription, setAiDescription] = useState('');
   const [aiMealResult, setAiMealResult] = useState<AiMealEstimate | null>(null);
+  const [editableMealDraft, setEditableMealDraft] = useState<EditableMealDraft | null>(null);
+  const [ingredientEditDraft, setIngredientEditDraft] = useState<IngredientEditDraft | null>(null);
   const [aiFoodResult, setAiFoodResult] = useState<AiFoodEstimate | null>(null);
   const [isGeneratingAiAutofill, setIsGeneratingAiAutofill] = useState(false);
+  const [voiceInputState, setVoiceInputState] = useState<VoiceInputState>('idle');
+  const mealVoiceRecorder = useAudioRecorder(MEAL_VOICE_RECORDING_OPTIONS);
+  const mealVoiceRecorderState = useAudioRecorderState(mealVoiceRecorder, 250);
   const mealNameInputRef = useRef<TextInput>(null);
   const aiDescriptionInputRef = useRef<TextInput>(null);
   const activeModeRef = useRef(activeMode);
   const detailsOpenRef = useRef(detailsOpen);
+  const voiceAutoStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceInputStateRef = useRef<VoiceInputState>('idle');
+  const isMealVoiceTranscribingRef = useRef(false);
 
   useEffect(() => {
     activeModeRef.current = activeMode;
     detailsOpenRef.current = detailsOpen;
-  }, [activeMode, detailsOpen]);
+    voiceInputStateRef.current = voiceInputState;
+  }, [activeMode, detailsOpen, voiceInputState]);
 
   useFocusEffect(
     useCallback(() => {
@@ -732,6 +831,38 @@ export default function AddFoodScreen() {
       setActiveMode(requestedMode);
     }
   }, [editingEntryId, requestedMode]);
+
+  useEffect(() => {
+    if (activeMode !== 'mealAi' && voiceInputStateRef.current !== 'idle') {
+      void handleCancelVoiceRecording({ silent: true });
+    }
+  }, [activeMode]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active' && voiceInputStateRef.current === 'recording') {
+        void handleCancelVoiceRecording({ silent: true });
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (voiceAutoStopTimeoutRef.current) {
+        clearTimeout(voiceAutoStopTimeoutRef.current);
+        voiceAutoStopTimeoutRef.current = null;
+      }
+
+      if (voiceInputStateRef.current === 'recording') {
+        void mealVoiceRecorder.stop().catch(() => undefined);
+      }
+
+      void setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+    },
+    [mealVoiceRecorder],
+  );
 
   const visibleFoods = useMemo(() => {
     const query = search.trim();
@@ -906,6 +1037,10 @@ export default function AddFoodScreen() {
       ),
     [mealIngredients],
   );
+  const editableMealTotals = useMemo(
+    () => calculateEditableMealTotals(editableMealDraft?.ingredients ?? []),
+    [editableMealDraft?.ingredients],
+  );
 
   function resetForm() {
     const nextMealLabel = getMealLabelState();
@@ -979,8 +1114,269 @@ export default function AddFoodScreen() {
   function resetAiAutofill() {
     setAiDescription('');
     setAiMealResult(null);
+    setEditableMealDraft(null);
+    setIngredientEditDraft(null);
     setAiFoodResult(null);
     setIsGeneratingAiAutofill(false);
+  }
+
+  function setMealVoiceState(nextState: VoiceInputState) {
+    voiceInputStateRef.current = nextState;
+    setVoiceInputState(nextState);
+  }
+
+  function clearVoiceAutoStopTimer() {
+    if (voiceAutoStopTimeoutRef.current) {
+      clearTimeout(voiceAutoStopTimeoutRef.current);
+      voiceAutoStopTimeoutRef.current = null;
+    }
+  }
+
+  function getMealVoiceMimeType() {
+    return Platform.OS === 'web' ? 'audio/webm' : 'audio/m4a';
+  }
+
+  function formatVoiceDuration(durationMs: number) {
+    const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  async function triggerHapticSafely(callback: () => Promise<void>) {
+    try {
+      await callback();
+    } catch {
+      // Haptics are optional feedback and should never block recording.
+    }
+  }
+
+  function normalizeVoiceMetering(db?: number) {
+    if (typeof db !== 'number') {
+      return 0.15;
+    }
+
+    const minDb = -60;
+    const clamped = Math.max(minDb, Math.min(0, db));
+    return (clamped - minDb) / Math.abs(minDb);
+  }
+
+  function getVoiceLevelBars(level: number, durationMs: number) {
+    const fallbackPulse = typeof mealVoiceRecorderState.metering === 'number'
+      ? 0
+      : (Math.sin(durationMs / 180) + 1) / 2;
+    const activeLevel = Math.max(level, fallbackPulse * 0.55);
+
+    return [0.35, 0.58, 0.82, 0.66, 0.45].map((weight, index) => {
+      const wave = typeof mealVoiceRecorderState.metering === 'number'
+        ? activeLevel
+        : Math.max(0.18, Math.min(0.9, activeLevel + Math.sin(durationMs / 160 + index) * 0.18));
+      return 8 + Math.round(22 * Math.max(0.12, Math.min(1, wave * weight + 0.18)));
+    });
+  }
+
+  function appendVoiceTranscript(transcript: string) {
+    const cleanedTranscript = transcript.replace(/\s+/g, ' ').trim();
+
+    if (!cleanedTranscript) {
+      return;
+    }
+
+    setAiDescription((currentDescription) => {
+      const current = currentDescription.trim();
+      const separator = current ? ' ' : '';
+      const remainingLength = MAX_AI_DESCRIPTION_LENGTH - current.length - separator.length;
+
+      if (remainingLength <= 0) {
+        return currentDescription;
+      }
+
+      return `${current}${separator}${cleanedTranscript.slice(0, remainingLength)}`.slice(
+        0,
+        MAX_AI_DESCRIPTION_LENGTH,
+      );
+    });
+
+    setTimeout(() => {
+      aiDescriptionInputRef.current?.focus();
+    }, 50);
+  }
+
+  async function handleStartVoiceRecording() {
+    if (voiceInputStateRef.current !== 'idle') {
+      return;
+    }
+
+    setMealVoiceState('requestingPermission');
+
+    try {
+      const permission = await AudioModule.requestRecordingPermissionsAsync();
+
+      if (!permission.granted) {
+        setMealVoiceState('idle');
+        void triggerHapticSafely(() =>
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error),
+        );
+        showToast({
+          title: 'Microphone access needed',
+          message: 'Enable microphone access or type your meal.',
+          type: 'warning',
+        });
+        AccessibilityInfo.announceForAccessibility('Microphone access is needed to describe your meal by voice.');
+        return;
+      }
+
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+      });
+      await mealVoiceRecorder.prepareToRecordAsync();
+      mealVoiceRecorder.record();
+      setMealVoiceState('recording');
+      void triggerHapticSafely(() =>
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium),
+      );
+      AccessibilityInfo.announceForAccessibility('Voice recording started.');
+      clearVoiceAutoStopTimer();
+      voiceAutoStopTimeoutRef.current = setTimeout(() => {
+        if (voiceInputStateRef.current === 'recording') {
+          void handleStopVoiceRecording();
+        }
+      }, MAX_VOICE_RECORDING_MS);
+    } catch (error) {
+      console.warn('Failed to start meal voice recording.', error);
+      clearVoiceAutoStopTimer();
+      setMealVoiceState('idle');
+      void triggerHapticSafely(() =>
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error),
+      );
+      showToast({
+        title: 'Could not start recording',
+        message: 'Try again or type your meal.',
+        type: 'warning',
+      });
+    }
+  }
+
+  async function handleTranscribeRecording(uri: string, durationMs?: number) {
+    if (isMealVoiceTranscribingRef.current) {
+      return;
+    }
+
+    isMealVoiceTranscribingRef.current = true;
+
+    try {
+      const result = await transcribeMealVoiceRecording({
+        durationMs,
+        languageHint: language,
+        mimeType: getMealVoiceMimeType(),
+        uri,
+      });
+
+      appendVoiceTranscript(result.transcript);
+      setMealVoiceState('idle');
+      showToast({
+        title: 'Voice added',
+        message: 'Review the description before generating.',
+        type: 'success',
+      });
+      AccessibilityInfo.announceForAccessibility('Voice transcription completed.');
+    } catch (error) {
+      setMealVoiceState('error');
+
+      const errorCode = error instanceof MealVoiceTranscriptionError ? error.code : 'TRANSCRIPTION_FAILED';
+      const isBusy = errorCode === 'AI_TEMPORARILY_UNAVAILABLE';
+      const isTimeout = errorCode === 'AI_TIMEOUT';
+      const isTooLong = errorCode === 'AUDIO_TOO_LONG' || errorCode === 'AUDIO_TOO_LARGE';
+
+      if (__DEV__) {
+        console.warn('[Meal Voice] transcription failed', {
+          code: errorCode,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      void triggerHapticSafely(() =>
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error),
+      );
+      showToast({
+        title: isTooLong
+          ? t('mealVoice.tooLongTitle')
+          : isTimeout
+            ? t('mealVoice.timeoutTitle')
+            : isBusy
+              ? 'Voice transcription is busy'
+              : 'Could not transcribe',
+        message: isTooLong
+          ? t('mealVoice.tooLongMessage')
+          : isTimeout
+            ? t('mealVoice.timeoutMessage')
+            : isBusy
+              ? 'Please try again in a moment.'
+              : 'Try recording again or type your meal.',
+        type: 'warning',
+      });
+      AccessibilityInfo.announceForAccessibility('Voice transcription failed.');
+      setMealVoiceState('idle');
+    } finally {
+      isMealVoiceTranscribingRef.current = false;
+    }
+  }
+
+  async function handleStopVoiceRecording() {
+    if (voiceInputStateRef.current !== 'recording') {
+      return;
+    }
+
+    clearVoiceAutoStopTimer();
+    setMealVoiceState('transcribing');
+    AccessibilityInfo.announceForAccessibility('Voice recording stopped. Transcribing.');
+    const recordedDurationMs = mealVoiceRecorderState.durationMillis ?? 0;
+
+    try {
+      await mealVoiceRecorder.stop();
+      void triggerHapticSafely(() =>
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+      );
+      await setAudioModeAsync({ allowsRecording: false });
+      const uri = mealVoiceRecorder.uri;
+
+      if (!uri) {
+        throw new MealVoiceTranscriptionError('MISSING_AUDIO', 'No audio was recorded.');
+      }
+
+      await handleTranscribeRecording(uri, recordedDurationMs);
+    } catch (error) {
+      console.warn('Failed to stop meal voice recording.', error);
+      await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+      setMealVoiceState('idle');
+      void triggerHapticSafely(() =>
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error),
+      );
+      showToast({
+        title: 'Could not transcribe',
+        message: 'Try recording again or type your meal.',
+        type: 'warning',
+      });
+    }
+  }
+
+  async function handleCancelVoiceRecording({ silent = false }: { silent?: boolean } = {}) {
+    clearVoiceAutoStopTimer();
+
+    if (voiceInputStateRef.current === 'recording') {
+      await mealVoiceRecorder.stop().catch(() => undefined);
+    }
+
+    await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+    setMealVoiceState('idle');
+
+    if (!silent) {
+      void triggerHapticSafely(() =>
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light),
+      );
+      AccessibilityInfo.announceForAccessibility('Voice recording cancelled.');
+    }
   }
 
   function openMealAiFlow() {
@@ -1029,30 +1425,55 @@ export default function AddFoodScreen() {
     setCustomMealLabel(nextMealLabel.custom);
   }
 
-  function applyAiMealEstimate(estimate: AiMealEstimate) {
-    const nextIngredients: MealIngredient[] = estimate.ingredients.map((ingredient, index) => ({
-      foodId: `ai:${normalizeText(ingredient.name)}:${index}`,
+  function createEditableMealDraft(estimate: AiMealEstimate): EditableMealDraft {
+    return {
+      title: estimate.mealName,
+      description: aiDescription,
+      provider: estimate.provider,
+      model: estimate.model,
+      confidence: estimate.confidence,
+      isDemo: estimate.isDemo,
+      ingredients: estimate.ingredients.map((ingredient, index) => ({
+        id: `ai:${normalizeText(ingredient.name)}:${index}`,
+        name: ingredient.name,
+        quantity: round(ingredient.quantityValue),
+        unit: ingredient.unit,
+        calories: Math.round(ingredient.calories),
+        protein: round(ingredient.protein),
+        carbs: round(ingredient.carbs),
+        fat: round(ingredient.fat),
+      })),
+    };
+  }
+
+  function applyEditableMealDraft(draft: EditableMealDraft) {
+    const nextIngredients: MealIngredient[] = draft.ingredients.map((ingredient, index) => ({
+      foodId: ingredient.id || `ai:${normalizeText(ingredient.name)}:${index}`,
       name: ingredient.name,
-      quantity: round(ingredient.quantityValue),
+      quantity: round(ingredient.quantity),
       unit: ingredient.unit,
       calories: Math.round(ingredient.calories),
       protein: round(ingredient.protein),
       carbs: round(ingredient.carbs),
       fat: round(ingredient.fat),
-      baseQuantity: round(ingredient.quantityValue),
+      baseQuantity: round(ingredient.quantity),
       baseCalories: Math.round(ingredient.calories),
       baseProtein: round(ingredient.protein),
       baseCarbs: round(ingredient.carbs),
       baseFat: round(ingredient.fat),
     }));
 
-    setMealName(estimate.mealName);
-    setCommittedMealName(estimate.mealName);
+    setMealName(draft.title);
+    setCommittedMealName(draft.title);
     setIsMealNameEditing(false);
     setMealIngredients(nextIngredients);
     resetIngredientForm();
     resetAiAutofill();
     setActiveMode('meal');
+  }
+
+  function applyAiMealEstimate(estimate: AiMealEstimate) {
+    applyEditableMealDraft(createEditableMealDraft(estimate));
   }
 
   function applyAiFoodEstimate(estimate: AiFoodEstimate) {
@@ -1148,6 +1569,9 @@ export default function AddFoodScreen() {
       }
 
       setAiMealResult(estimate);
+      setEditableMealDraft(createEditableMealDraft(estimate));
+      setIngredientEditDraft(null);
+      setActiveMode('mealAiReview');
     } catch (error) {
       if (isAiQuotaExceededError(error)) {
         showToast({
@@ -1584,15 +2008,147 @@ export default function AddFoodScreen() {
 
     setMealPhotoUri(result.assets[0].uri);
     setMealPhotoEstimateVisible(false);
+    setMealPhotoAiEstimate(null);
+    setMealPhotoEstimateError(null);
   }
 
   function resetMealPhotoFlow() {
     setMealPhotoUri(null);
-    setMealPhotoPortion('medium');
-    setMealPhotoCookingFat('none');
-    setMealPhotoSauce('none');
-    setMealPhotoFoodType('mixed');
     setMealPhotoEstimateVisible(false);
+    setMealPhotoAiEstimate(null);
+    setIsEstimatingMealPhoto(false);
+    setMealPhotoEstimateError(null);
+  }
+
+  function toMealPhotoEstimate(estimate: MealPhotoVisionEstimate): MealPhotoEstimate {
+    return {
+      name: estimate.mealName,
+      calories: Math.round(estimate.totals.calories),
+      protein: round(estimate.totals.protein),
+      carbs: round(estimate.totals.carbs),
+      fat: round(estimate.totals.fat),
+      confidence:
+        estimate.confidence === 'low'
+          ? 'Low estimate confidence'
+          : 'Medium estimate confidence',
+      explanation:
+        estimate.notes.length > 0
+          ? estimate.notes.join(' ')
+          : 'AI estimates are approximate. Review before saving.',
+      provider: estimate.provider,
+      model: estimate.model,
+      isDemo: estimate.isDemo,
+      items: estimate.items.map((item, index) => ({
+        id: `meal-photo-${index}-${item.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        name: item.name,
+        estimatedQuantity: item.estimatedQuantity,
+        calories: item.calories,
+        protein: item.protein,
+        carbs: item.carbs,
+        fat: item.fat,
+        confidence: item.confidence,
+        notes: item.notes,
+      })),
+      notes: estimate.notes,
+    };
+  }
+
+  function getMealPhotoFailureCopy(error: unknown) {
+    if (error instanceof MealPhotoVisionError) {
+      if (error.code === 'NO_FOOD_DETECTED') {
+        return {
+          title: t('scanMeal.noFoodDetectedTitle'),
+          message: t('scanMeal.noFoodDetectedMessage'),
+          type: 'info' as const,
+        };
+      }
+
+      if (error.code === 'AI_TEMPORARILY_UNAVAILABLE' || error.code === 'AI_TIMEOUT') {
+        return {
+          title: t('ai.busy'),
+          message: t('scanMeal.estimateFailedMessage'),
+          type: 'warning' as const,
+        };
+      }
+
+      if (error.code === 'AI_QUOTA_EXCEEDED') {
+        return {
+          title: t('ai.limitReached'),
+          message: t('ai.limitReachedMessage'),
+          type: 'warning' as const,
+        };
+      }
+
+      if (error.code === 'MISSING_AI_PROVIDER_KEY') {
+        return {
+          title: 'AI is not configured',
+          message: 'Add this meal manually for now.',
+          type: 'error' as const,
+        };
+      }
+    }
+
+    return {
+      title: t('scanMeal.estimateFailedTitle'),
+      message: t('scanMeal.estimateFailedMessage'),
+      type: 'warning' as const,
+    };
+  }
+
+  async function handleEstimateMealPhoto() {
+    if (!mealPhotoUri || isEstimatingMealPhoto) {
+      return;
+    }
+
+    if (!canSpendTokens(MEAL_PHOTO_TOKEN_COST)) {
+      showToast({
+        title: t('scanMeal.notEnoughTokens'),
+        message: 'Meal photo estimates cost 5 tokens.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    setIsEstimatingMealPhoto(true);
+    setMealPhotoEstimateError(null);
+    showToast({
+      title: t('scanMeal.estimatingMeal'),
+      message: t('scanMeal.thisCanTakeSeconds'),
+      type: 'info',
+    });
+
+    try {
+      const visionEstimate = await estimateMealPhoto(mealPhotoUri);
+
+      if (!visionEstimate.isDemo) {
+        const didSpend = await spendTokens(MEAL_PHOTO_TOKEN_COST, 'meal_photo_estimate');
+
+        if (!didSpend) {
+          showNotEnoughTokensAlert();
+          return;
+        }
+
+      }
+
+      setMealPhotoAiEstimate(toMealPhotoEstimate(visionEstimate));
+      setMealPhotoEstimateVisible(true);
+      setMealPhotoEstimateError(null);
+      showToast({
+        title: t('scanMeal.reviewEstimate'),
+        message: 'Review the estimate before saving.',
+        type: 'success',
+      });
+    } catch (error) {
+      const copy = getMealPhotoFailureCopy(error);
+      setMealPhotoEstimateError(copy.message);
+      showToast(copy);
+
+      if (!(error instanceof MealPhotoVisionError)) {
+        console.error('[Meal Photo Vision] unexpected failure', error);
+      }
+    } finally {
+      setIsEstimatingMealPhoto(false);
+    }
   }
 
   function resetNutritionFactsFlow() {
@@ -1907,21 +2463,15 @@ export default function AddFoodScreen() {
   }
 
   async function handleSaveMealPhotoEstimate() {
-    const estimate = estimateMealFromPhoto({
-      cookingFat: mealPhotoCookingFat,
-      foodType: mealPhotoFoodType,
-      portionSize: mealPhotoPortion,
-      sauce: mealPhotoSauce,
-    });
+    const estimate = mealPhotoAiEstimate;
 
-    if (!canSpendTokens(MEAL_PHOTO_TOKEN_COST)) {
-      showNotEnoughTokensAlert();
+    if (!estimate) {
       return;
     }
 
     await addFood({
       name: estimate.name,
-      foodKey: 'meal_photo:estimated_meal',
+      foodKey: `meal_photo:${estimate.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'estimated-meal'}`,
       source: 'meal_photo',
       calories: estimate.calories,
       quantity: '1 plate',
@@ -1937,8 +2487,12 @@ export default function AddFoodScreen() {
       baseFat: estimate.fat,
       mealLabel: effectiveMealLabel,
     });
-    await spendTokens(MEAL_PHOTO_TOKEN_COST, 'meal_photo_estimate');
     resetMealPhotoFlow();
+    showToast({
+      title: t('toast.addedToToday'),
+      message: `${estimate.name} was added to your daily log.`,
+      type: 'success',
+    });
     router.push('/');
   }
 
@@ -2280,8 +2834,115 @@ export default function AddFoodScreen() {
     setMealName(nextMeal.name);
     setIsMealNameEditing(false);
     await spendTokens(1, 'add_meal');
-    Alert.alert('Meal saved', `${mealName.trim()} will appear in food search.`);
+    showMealSavedDialog({ meal: nextMeal, totals: mealTotals });
     return nextMeal;
+  }
+
+  function showMealSavedDialog({
+    meal,
+    totals,
+  }: {
+    meal: MealTemplate;
+    totals: { calories: number; protein: number; carbs: number; fat: number };
+  }) {
+    const mealNameForLog = meal.name.trim();
+
+    showDialog({
+      dismissOnBackdropPress: false,
+      helperText: 'You can keep it in your reusable foods, or add it to today now.',
+      message: 'Your meal was saved successfully.',
+      title: 'Meal saved',
+      variant: 'success',
+      actions: [
+        {
+          label: 'Add to today',
+          onPress: async () => {
+            await addFood({
+              name: mealNameForLog,
+              foodKey: `meal:${(meal.supabaseId ?? meal.id ?? mealNameForLog).toLowerCase()}`,
+              source: 'meal',
+              calories: Math.round(totals.calories),
+              quantity: '1 meal',
+              quantityValue: 1,
+              unit: 'meal',
+              protein: round(totals.protein),
+              carbs: round(totals.carbs),
+              fat: round(totals.fat),
+              baseQuantity: 1,
+              baseCalories: Math.round(totals.calories),
+              baseProtein: round(totals.protein),
+              baseCarbs: round(totals.carbs),
+              baseFat: round(totals.fat),
+              mealLabel: effectiveMealLabel,
+            });
+            showToast({
+              title: 'Added to today',
+              message: `${mealNameForLog} was added to your daily log.`,
+              type: 'success',
+            });
+          },
+          variant: 'primary',
+        },
+        {
+          label: 'Done',
+          variant: 'secondary',
+        },
+      ],
+    });
+  }
+
+  async function handleSaveEditableMealDraft() {
+    const draft = editableMealDraft;
+
+    if (!draft || draft.ingredients.length === 0) {
+      Alert.alert('Check meal', 'Add at least one ingredient before saving.');
+      return;
+    }
+
+    if (!canSpendTokens(1)) {
+      showNotEnoughTokensAlert();
+      return;
+    }
+
+    const nextIngredients: MealIngredient[] = draft.ingredients.map((ingredient) => ({
+      foodId: ingredient.id,
+      name: ingredient.name,
+      quantity: round(ingredient.quantity),
+      unit: ingredient.unit,
+      calories: Math.round(ingredient.calories),
+      protein: round(ingredient.protein),
+      carbs: round(ingredient.carbs),
+      fat: round(ingredient.fat),
+      baseQuantity: round(ingredient.quantity),
+      baseCalories: Math.round(ingredient.calories),
+      baseProtein: round(ingredient.protein),
+      baseCarbs: round(ingredient.carbs),
+      baseFat: round(ingredient.fat),
+    }));
+    const nextTotals = calculateEditableMealTotals(draft.ingredients);
+    const nextMealName = draft.title.trim() || 'AI estimated meal';
+
+    setIsSaving(true);
+
+    try {
+      const nextMeal = await addMealTemplate({
+        name: nextMealName,
+        ingredients: nextIngredients,
+        calories: Math.round(nextTotals.calories),
+        protein: round(nextTotals.protein),
+        carbs: round(nextTotals.carbs),
+        fat: round(nextTotals.fat),
+      });
+      setSavedMealId(nextMeal.supabaseId ?? nextMeal.id);
+      setCommittedMealName(nextMeal.name);
+      setMealName(nextMeal.name);
+      setMealIngredients(nextIngredients);
+      setIsMealNameEditing(false);
+      await spendTokens(1, 'add_meal');
+      showMealSavedDialog({ meal: nextMeal, totals: nextTotals });
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   async function handleAddMealToToday() {
@@ -2587,6 +3248,9 @@ export default function AddFoodScreen() {
     const confidenceLabel = aiFoodResult
       ? `${aiFoodResult.confidence.charAt(0).toUpperCase()}${aiFoodResult.confidence.slice(1)} confidence`
       : null;
+    const voiceDurationMs = mealVoiceRecorderState.durationMillis ?? 0;
+    const voiceLevel = normalizeVoiceMetering(mealVoiceRecorderState.metering);
+    const voiceLevelBars = getVoiceLevelBars(voiceLevel, voiceDurationMs);
 
     if (isMeal) {
       return (
@@ -2615,20 +3279,15 @@ export default function AddFoodScreen() {
               </View>
 
               <ScrollView
-                contentContainerStyle={styles.buildMealAiScrollContent}
+                contentContainerStyle={[styles.buildMealAiScrollContent, styles.buildMealAiScrollContentCompact]}
                 keyboardDismissMode="on-drag"
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={false}>
-                <View style={styles.buildMealIntroRow}>
-                  <View style={[styles.buildMealIntroIcon, { backgroundColor: theme.success + '18' }]}>
-                    <Ionicons name="sparkles-outline" size={16} color={theme.success} />
-                  </View>
-                  <View style={styles.buildMealIntroCopy}>
-                    <Text style={[styles.buildMealIntroTitle, { color: theme.text }]}>AI meal builder</Text>
-                    <Text style={[styles.buildMealIntroSubtitle, { color: theme.mutedText }]}>
-                      Write what you ate. We will draft editable ingredients.
-                    </Text>
-                  </View>
+                <View style={[styles.buildMealCompactBadge, { backgroundColor: theme.successSoft }]}>
+                  <Ionicons name="sparkles-outline" size={14} color={theme.success} />
+                  <Text style={[styles.buildMealCompactBadgeText, { color: theme.successDark }]}>
+                    AI meal builder
+                  </Text>
                 </View>
 
                 <View style={[styles.mealComposerPanel, { backgroundColor: theme.card, shadowColor: theme.shadow }]}>
@@ -2642,16 +3301,103 @@ export default function AddFoodScreen() {
                     value={aiDescription}
                   />
                   <View style={styles.mealComposerFooter}>
-                    <View style={[styles.mealComposerPill, { backgroundColor: theme.success + '10' }]}>
-                      <Ionicons name="sparkles-outline" size={15} color={theme.success} />
-                      <Text style={[styles.mealComposerPillText, { color: theme.mutedText }]}>
-                        Editable before saving
+                    <View style={styles.mealComposerMeta}>
+                      <View style={[styles.mealComposerPill, { backgroundColor: theme.success + '10' }]}>
+                        <Ionicons name="sparkles-outline" size={15} color={theme.success} />
+                        <Text style={[styles.mealComposerPillText, { color: theme.mutedText }]}>
+                          Editable before saving
+                        </Text>
+                      </View>
+                      <Text style={[styles.mealComposerCount, { color: theme.mutedText }]}>
+                        {aiDescription.length}/500
                       </Text>
                     </View>
-                    <Text style={[styles.mealComposerCount, { color: theme.mutedText }]}>
-                      {aiDescription.length}/500
-                    </Text>
+                    <Pressable
+                      accessibilityHint="Records your meal description"
+                      accessibilityLabel="Describe meal by voice"
+                      accessibilityRole="button"
+                      disabled={voiceInputState === 'requestingPermission' || voiceInputState === 'transcribing'}
+                      onPress={() => void handleStartVoiceRecording()}
+                      style={({ pressed }) => [
+                        styles.mealVoiceIconButton,
+                        {
+                          backgroundColor:
+                            voiceInputState === 'transcribing' || voiceInputState === 'requestingPermission'
+                              ? theme.chipBackground
+                              : theme.successSoft,
+                        },
+                        pressed && voiceInputState === 'idle' ? styles.buttonPressed : null,
+                      ]}>
+                      {voiceInputState === 'transcribing' || voiceInputState === 'requestingPermission' ? (
+                        <ActivityIndicator color={theme.success} size="small" />
+                      ) : (
+                        <Ionicons name="mic-outline" size={20} color={theme.success} />
+                      )}
+                    </Pressable>
                   </View>
+                  {voiceInputState === 'transcribing' || voiceInputState === 'requestingPermission' ? (
+                    <Text
+                      accessibilityLiveRegion="polite"
+                      style={[styles.mealVoiceInlineStatus, { color: theme.successDark }]}>
+                      {voiceInputState === 'transcribing' ? t('mealVoice.transcribing') : 'Preparing microphone...'}
+                    </Text>
+                  ) : null}
+                  {voiceInputState === 'recording' ? (
+                    <View style={[styles.mealVoiceRecordingBar, { backgroundColor: theme.dangerSoft }]}>
+                      <View style={styles.mealVoiceRecordingTopRow}>
+                        <View style={styles.mealVoiceRecordingInfo} accessibilityLiveRegion="polite">
+                          <View style={[styles.mealVoiceRecordingDot, { backgroundColor: theme.danger }]} />
+                          <Text style={[styles.mealVoiceRecordingText, { color: theme.danger }]}>
+                            Recording {formatVoiceDuration(voiceDurationMs)}
+                          </Text>
+                        </View>
+                        <View
+                          accessibilityElementsHidden
+                          importantForAccessibility="no"
+                          style={styles.mealVoiceLevelMeter}>
+                          {voiceLevelBars.map((height, index) => (
+                            <View
+                              key={`voice-level-${index}`}
+                              style={[
+                                styles.mealVoiceLevelBar,
+                                {
+                                  backgroundColor: theme.danger,
+                                  height,
+                                  opacity: 0.38 + Math.min(0.5, voiceLevel),
+                                },
+                              ]}
+                            />
+                          ))}
+                        </View>
+                      </View>
+                      <View style={styles.mealVoiceRecordingActions}>
+                        <Pressable
+                          accessibilityLabel="Cancel voice recording"
+                          accessibilityRole="button"
+                          onPress={() => void handleCancelVoiceRecording()}
+                          style={({ pressed }) => [
+                            styles.mealVoiceActionButton,
+                            { backgroundColor: 'transparent' },
+                            pressed && styles.buttonPressed,
+                          ]}>
+                          <Text style={[styles.mealVoiceActionText, { color: theme.mutedText }]}>
+                            {t('mealVoice.cancel')}
+                          </Text>
+                        </Pressable>
+                        <Pressable
+                          accessibilityLabel="Stop voice recording"
+                          accessibilityRole="button"
+                          onPress={() => void handleStopVoiceRecording()}
+                          style={({ pressed }) => [
+                            styles.mealVoiceStopButton,
+                            { backgroundColor: theme.danger },
+                            pressed && styles.buttonPressed,
+                          ]}>
+                          <Text style={styles.mealVoiceStopText}>Stop</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : null}
                 </View>
 
                 <View style={styles.buildMealHelperChips}>
@@ -2729,46 +3475,6 @@ export default function AddFoodScreen() {
                   ))}
                 </View>
 
-                {aiMealResult ? (
-                  <View style={[styles.card, surfaceStyle]}>
-                    <Text style={[styles.resultsTitle, textStyle]}>{t('ai.reviewBeforeSaving')}</Text>
-                    {providerLabel ? (
-                      <View style={[styles.aiProviderBadge, { backgroundColor: theme.chipBackground }]}>
-                        <Text style={[styles.aiProviderBadgeText, { color: aiMealResult.isDemo ? theme.warning : theme.primary }]}>
-                          {providerLabel}
-                        </Text>
-                      </View>
-                    ) : null}
-                    <Text style={[styles.foodResultName, textStyle]}>{aiMealResult.mealName}</Text>
-                    <View style={styles.aiResultList}>
-                      {aiMealResult.ingredients.map((ingredient) => (
-                        <View key={`${ingredient.name}-${ingredient.quantityValue}`} style={[styles.ingredientRow, softSurfaceStyle]}>
-                          <View style={styles.flexField}>
-                            <Text style={[styles.foodResultName, textStyle]}>
-                              {ingredient.name} · {ingredient.quantityValue}
-                              {ingredient.unit}
-                            </Text>
-                            <Text style={[styles.foodResultMeta, mutedTextStyle]}>
-                              {ingredient.calories} cal · P {ingredient.protein}g / C {ingredient.carbs}g / F {ingredient.fat}g
-                            </Text>
-                          </View>
-                        </View>
-                      ))}
-                      <Pressable
-                        accessibilityRole="button"
-                        onPress={() => applyAiMealEstimate(aiMealResult)}
-                        style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
-                        <Text style={styles.buttonText}>Use this estimate</Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityRole="button"
-                        onPress={() => setAiMealResult(null)}
-                        style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}>
-                        <Text style={styles.secondaryButtonText}>Edit description</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                ) : null}
               </ScrollView>
             </View>
           </Screen>
@@ -3063,8 +3769,598 @@ export default function AddFoodScreen() {
     );
   }
 
+  function handleEditAiMealDescription() {
+    setActiveMode('mealAi');
+    setTimeout(() => {
+      aiDescriptionInputRef.current?.focus();
+    }, 50);
+  }
+
+  function createIngredientEditDraft(ingredient: EditableMealIngredient): IngredientEditDraft {
+    return {
+      baseline: ingredient,
+      fields: {
+        name: ingredient.name,
+        quantity: formatDraftNumber(ingredient.quantity),
+        unit: ingredient.unit,
+        calories: formatDraftNumber(ingredient.calories),
+        protein: formatDraftNumber(ingredient.protein),
+        carbs: formatDraftNumber(ingredient.carbs),
+        fat: formatDraftNumber(ingredient.fat),
+        sugar: formatDraftNumber(ingredient.sugar),
+        salt: formatDraftNumber(ingredient.salt),
+        saturatedFat: formatDraftNumber(ingredient.saturatedFat),
+        fiber: formatDraftNumber(ingredient.fiber),
+      },
+      touched: {},
+    };
+  }
+
+  function handleEditMealIngredient(ingredient: EditableMealIngredient) {
+    setIngredientEditDraft(createIngredientEditDraft(ingredient));
+  }
+
+  function handleCancelMealIngredientEdit() {
+    setIngredientEditDraft(null);
+  }
+
+  function scaleDraftNutritionField(
+    baseline: EditableMealIngredient,
+    field: EditableNutritionField,
+    factor: number,
+  ) {
+    const baselineValue = baseline[field];
+
+    if (baselineValue === null || baselineValue === undefined) {
+      return '';
+    }
+
+    const nextValue = field === 'calories'
+      ? Math.round(baselineValue * factor)
+      : round(baselineValue * factor);
+
+    return String(nextValue);
+  }
+
+  function handleMealIngredientEditField(field: keyof IngredientEditDraft['fields'], value: string) {
+    setIngredientEditDraft((currentDraft) => {
+      if (!currentDraft) {
+        return currentDraft;
+      }
+
+      const nextFields = { ...currentDraft.fields, [field]: value };
+      const nextTouched = { ...currentDraft.touched };
+
+      if (field === 'quantity') {
+        const nextQuantity = parseDraftNumber(value);
+        const baselineQuantity = currentDraft.baseline.quantity;
+
+        if (nextQuantity !== null && nextQuantity > 0 && baselineQuantity > 0) {
+          const scaleFactor = nextQuantity / baselineQuantity;
+          (['calories', 'protein', 'carbs', 'fat', 'sugar', 'salt', 'saturatedFat', 'fiber'] as EditableNutritionField[])
+            .forEach((nutritionField) => {
+              if (!nextTouched[nutritionField]) {
+                nextFields[nutritionField] = scaleDraftNutritionField(
+                  currentDraft.baseline,
+                  nutritionField,
+                  scaleFactor,
+                );
+              }
+            });
+        }
+      } else if (
+        field === 'calories' ||
+        field === 'protein' ||
+        field === 'carbs' ||
+        field === 'fat' ||
+        field === 'sugar' ||
+        field === 'salt' ||
+        field === 'saturatedFat' ||
+        field === 'fiber'
+      ) {
+        nextTouched[field] = true;
+      }
+
+      return { ...currentDraft, fields: nextFields, touched: nextTouched };
+    });
+  }
+
+  function getIngredientEditValidation(fields: IngredientEditDraft['fields']) {
+    const name = fields.name.trim();
+    const quantity = parseDraftNumber(fields.quantity);
+    const calories = parseDraftNumber(fields.calories);
+    const protein = parseDraftNumber(fields.protein);
+    const carbs = parseDraftNumber(fields.carbs);
+    const fat = parseDraftNumber(fields.fat);
+    const optionalFields = [fields.sugar, fields.salt, fields.saturatedFat, fields.fiber];
+
+    if (!name) {
+      return 'Ingredient name is required.';
+    }
+
+    if (quantity === null || quantity <= 0) {
+      return 'Quantity must be greater than 0.';
+    }
+
+    if (
+      calories === null ||
+      calories < 0 ||
+      protein === null ||
+      protein < 0 ||
+      carbs === null ||
+      carbs < 0 ||
+      fat === null ||
+      fat < 0
+    ) {
+      return 'Calories and macros must be valid non-negative numbers.';
+    }
+
+    const hasInvalidOptionalField = optionalFields.some((fieldValue) => {
+      if (!fieldValue.trim()) {
+        return false;
+      }
+
+      const parsed = parseDraftNumber(fieldValue);
+      return parsed === null || parsed < 0;
+    });
+
+    return hasInvalidOptionalField ? 'Optional nutrition values must be valid non-negative numbers.' : null;
+  }
+
+  function handleSaveMealIngredientEdit() {
+    if (!ingredientEditDraft) {
+      return;
+    }
+
+    const validationError = getIngredientEditValidation(ingredientEditDraft.fields);
+
+    if (validationError) {
+      showToast({ title: 'Check ingredient', message: validationError, type: 'warning' });
+      return;
+    }
+
+    const fields = ingredientEditDraft.fields;
+    const nextIngredient: EditableMealIngredient = {
+      id: ingredientEditDraft.baseline.id,
+      name: fields.name.trim(),
+      quantity: round(parseDraftNumber(fields.quantity) ?? ingredientEditDraft.baseline.quantity),
+      unit: fields.unit.trim() || ingredientEditDraft.baseline.unit || 'serving',
+      calories: Math.round(parseDraftNumber(fields.calories) ?? ingredientEditDraft.baseline.calories),
+      protein: round(parseDraftNumber(fields.protein) ?? ingredientEditDraft.baseline.protein),
+      carbs: round(parseDraftNumber(fields.carbs) ?? ingredientEditDraft.baseline.carbs),
+      fat: round(parseDraftNumber(fields.fat) ?? ingredientEditDraft.baseline.fat),
+      sugar: fields.sugar.trim() ? round(parseDraftNumber(fields.sugar) ?? 0) : ingredientEditDraft.baseline.sugar,
+      salt: fields.salt.trim() ? round(parseDraftNumber(fields.salt) ?? 0) : ingredientEditDraft.baseline.salt,
+      saturatedFat: fields.saturatedFat.trim()
+        ? round(parseDraftNumber(fields.saturatedFat) ?? 0)
+        : ingredientEditDraft.baseline.saturatedFat,
+      fiber: fields.fiber.trim() ? round(parseDraftNumber(fields.fiber) ?? 0) : ingredientEditDraft.baseline.fiber,
+    };
+
+    setEditableMealDraft((currentDraft) =>
+      currentDraft
+        ? {
+            ...currentDraft,
+            ingredients: currentDraft.ingredients.map((ingredient) =>
+              ingredient.id === nextIngredient.id ? nextIngredient : ingredient,
+            ),
+          }
+        : currentDraft,
+    );
+    setIngredientEditDraft(null);
+  }
+
+  function handleDeleteMealIngredient(ingredient: EditableMealIngredient) {
+    Alert.alert('Remove ingredient?', 'This will update the meal nutrition totals.', [
+      { style: 'cancel', text: 'Cancel' },
+      {
+        style: 'destructive',
+        text: 'Remove',
+        onPress: () => {
+          setIngredientEditDraft((currentDraft) =>
+            currentDraft?.baseline.id === ingredient.id ? null : currentDraft,
+          );
+          setEditableMealDraft((currentDraft) =>
+            currentDraft
+              ? {
+                  ...currentDraft,
+                  ingredients: currentDraft.ingredients.filter((item) => item.id !== ingredient.id),
+                }
+              : currentDraft,
+          );
+        },
+      },
+    ]);
+  }
+
+  function getIngredientFieldError(field: keyof IngredientEditDraft['fields'], value: string) {
+    const trimmedValue = value.trim();
+
+    if (field === 'name') {
+      return trimmedValue ? null : 'Name is required';
+    }
+
+    if (field === 'quantity') {
+      const parsed = parseDraftNumber(value);
+      return parsed !== null && parsed > 0 ? null : 'Quantity must be greater than 0';
+    }
+
+    if (field === 'unit') {
+      return null;
+    }
+
+    if (!trimmedValue && (field === 'sugar' || field === 'salt' || field === 'saturatedFat' || field === 'fiber')) {
+      return null;
+    }
+
+    const parsed = parseDraftNumber(value);
+    return parsed !== null && parsed >= 0 ? null : 'Enter a valid number';
+  }
+
+  function renderIngredientEditField({
+    field,
+    label,
+    unit,
+    keyboardType = 'default',
+    helper,
+  }: {
+    field: keyof IngredientEditDraft['fields'];
+    label: string;
+    unit?: string;
+    keyboardType?: 'default' | 'decimal-pad';
+    helper?: string;
+  }) {
+    if (!ingredientEditDraft) {
+      return null;
+    }
+
+    const value = ingredientEditDraft.fields[field];
+    const error = getIngredientFieldError(field, value);
+    const showError = Boolean(error && (value.trim() || field === 'name' || field === 'quantity'));
+
+    return (
+      <View style={styles.ingredientSheetField}>
+        <View style={styles.ingredientSheetLabelRow}>
+          <Text style={[styles.ingredientSheetLabel, { color: theme.mutedText }]}>{label}</Text>
+          {unit ? <Text style={[styles.ingredientSheetUnit, { color: theme.textTertiary }]}>{unit}</Text> : null}
+        </View>
+        <TextInput
+          keyboardType={keyboardType}
+          onChangeText={(nextValue) => handleMealIngredientEditField(field, nextValue)}
+          placeholder={label}
+          placeholderTextColor={theme.textTertiary}
+          style={[
+            styles.ingredientSheetInput,
+            {
+              backgroundColor: theme.inputBackground,
+              borderColor: showError ? theme.danger : theme.cardBorder,
+              color: theme.text,
+            },
+          ]}
+          value={value}
+        />
+        {helper ? (
+          <Text style={[styles.ingredientSheetHelper, { color: theme.textTertiary }]}>{helper}</Text>
+        ) : showError ? (
+          <Text style={[styles.ingredientSheetHelper, { color: theme.danger }]}>{error}</Text>
+        ) : null}
+      </View>
+    );
+  }
+
+  function renderIngredientEditorSheet() {
+    const draft = ingredientEditDraft;
+
+    return (
+      <Modal
+        animationType="slide"
+        onRequestClose={handleCancelMealIngredientEdit}
+        transparent
+        visible={Boolean(draft)}>
+        <KeyboardAvoidingView
+          behavior={Platform.select({ ios: 'padding', android: undefined })}
+          style={styles.ingredientSheetOverlay}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Cancel ingredient editing"
+            onPress={handleCancelMealIngredientEdit}
+            style={styles.ingredientSheetBackdrop}
+          />
+          {draft ? (
+            <View style={[styles.ingredientSheet, { backgroundColor: theme.card }]}>
+              <View style={styles.ingredientSheetHandle} />
+              <View style={styles.ingredientSheetHeader}>
+                <View style={styles.ingredientSheetHeaderText}>
+                  <Text style={[styles.ingredientSheetTitle, { color: theme.text }]}>Edit ingredient</Text>
+                  <Text style={[styles.ingredientSheetSubtitle, { color: theme.mutedText }]}>
+                    Adjust the serving and nutrition values.
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityLabel="Close ingredient editor"
+                  accessibilityRole="button"
+                  onPress={handleCancelMealIngredientEdit}
+                  style={({ pressed }) => [
+                    styles.ingredientSheetCloseButton,
+                    { backgroundColor: theme.chipBackground },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Ionicons name="close" size={20} color={theme.text} />
+                </Pressable>
+              </View>
+
+              <ScrollView
+                contentContainerStyle={styles.ingredientSheetContent}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}>
+                <View style={styles.ingredientSheetSection}>
+                  <Text style={[styles.ingredientSheetSectionTitle, { color: theme.text }]}>Ingredient</Text>
+                  {renderIngredientEditField({ field: 'name', label: 'Name' })}
+                </View>
+
+                <View style={styles.ingredientSheetSection}>
+                  <Text style={[styles.ingredientSheetSectionTitle, { color: theme.text }]}>Serving</Text>
+                  <View style={styles.ingredientSheetGrid}>
+                    {renderIngredientEditField({
+                      field: 'quantity',
+                      label: 'Quantity',
+                      keyboardType: 'decimal-pad',
+                      helper: 'Nutrition values update with quantity.',
+                    })}
+                    {renderIngredientEditField({ field: 'unit', label: 'Unit' })}
+                  </View>
+                </View>
+
+                <View style={styles.ingredientSheetSection}>
+                  <Text style={[styles.ingredientSheetSectionTitle, { color: theme.text }]}>Nutrition</Text>
+                  <View style={styles.ingredientSheetGrid}>
+                    {renderIngredientEditField({ field: 'calories', label: 'Calories', keyboardType: 'decimal-pad' })}
+                    {renderIngredientEditField({ field: 'protein', label: 'Protein', unit: 'g', keyboardType: 'decimal-pad' })}
+                    {renderIngredientEditField({ field: 'carbs', label: 'Carbs', unit: 'g', keyboardType: 'decimal-pad' })}
+                    {renderIngredientEditField({ field: 'fat', label: 'Fat', unit: 'g', keyboardType: 'decimal-pad' })}
+                    {draft.fields.sugar.trim()
+                      ? renderIngredientEditField({ field: 'sugar', label: 'Sugar', unit: 'g', keyboardType: 'decimal-pad' })
+                      : null}
+                    {draft.fields.salt.trim()
+                      ? renderIngredientEditField({ field: 'salt', label: 'Salt', unit: 'g', keyboardType: 'decimal-pad' })
+                      : null}
+                    {draft.fields.saturatedFat.trim()
+                      ? renderIngredientEditField({
+                          field: 'saturatedFat',
+                          label: 'Saturated fat',
+                          unit: 'g',
+                          keyboardType: 'decimal-pad',
+                        })
+                      : null}
+                    {draft.fields.fiber.trim()
+                      ? renderIngredientEditField({ field: 'fiber', label: 'Fiber', unit: 'g', keyboardType: 'decimal-pad' })
+                      : null}
+                  </View>
+                </View>
+              </ScrollView>
+
+              <View style={[styles.ingredientSheetActions, { borderTopColor: theme.cardBorder }]}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleCancelMealIngredientEdit}
+                  style={({ pressed }) => [
+                    styles.ingredientSheetActionButton,
+                    { backgroundColor: theme.chipBackground },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Text style={[styles.ingredientSheetSecondaryText, { color: theme.text }]}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleSaveMealIngredientEdit}
+                  style={({ pressed }) => [
+                    styles.ingredientSheetActionButton,
+                    { backgroundColor: theme.success },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Text style={styles.ingredientSheetPrimaryText}>Save changes</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+        </KeyboardAvoidingView>
+      </Modal>
+    );
+  }
+
+  function renderMealAiReviewScreen() {
+    const draft = editableMealDraft;
+
+    if (!draft) {
+      return renderAiAutofillScreen('meal');
+    }
+
+    const providerLabel = getAiProviderLabel(aiMealResult);
+    const confidence = draft.confidence ?? aiMealResult?.confidence ?? 'low';
+    const confidenceLabel = `${confidence.charAt(0).toUpperCase()}${confidence.slice(1)} confidence`;
+    const hasIngredients = draft.ingredients.length > 0;
+
+    return (
+      <KeyboardAvoidingView
+        behavior={Platform.select({ ios: 'padding', android: undefined })}
+        style={styles.keyboardView}>
+        <Screen scroll={false}>
+          <View style={styles.scanProductScreen}>
+            <View style={styles.scanFixedHeader}>
+              <View style={styles.scanHeaderTopRow}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleEditAiMealDescription}
+                  style={({ pressed }) => [styles.scanBackButton, pressed && styles.buttonPressed]}>
+                  <Ionicons name="chevron-back" size={16} color={theme.primary} />
+                  <Text style={[styles.scanBackText, { color: theme.primary }]}>{t('common.back')}</Text>
+                </Pressable>
+                {renderHeaderTokenPill()}
+              </View>
+              <View style={styles.scanHeaderTextBlock}>
+                <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>Review meal</Text>
+                <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
+                  Check and adjust the ingredients before saving.
+                </Text>
+              </View>
+            </View>
+
+            <ScrollView
+              contentContainerStyle={styles.mealReviewScrollContent}
+              keyboardDismissMode="on-drag"
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}>
+              <View style={[styles.mealReviewSummaryCard, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
+                <View style={styles.mealReviewBadgeRow}>
+                  <View style={[styles.mealReviewBadge, { backgroundColor: theme.successSoft }]}>
+                    <Text style={[styles.mealReviewBadgeText, { color: theme.successDark }]}>AI estimate</Text>
+                  </View>
+                  {providerLabel ? (
+                    <View style={[styles.mealReviewBadge, { backgroundColor: theme.primarySoft }]}>
+                      <Text style={[styles.mealReviewBadgeText, { color: theme.primary }]}>{providerLabel}</Text>
+                    </View>
+                  ) : null}
+                  <View style={[styles.mealReviewBadge, { backgroundColor: theme.chipBackground }]}>
+                    <Text style={[styles.mealReviewBadgeText, { color: theme.mutedText }]}>{confidenceLabel}</Text>
+                  </View>
+                </View>
+
+                <Text style={[styles.mealReviewTitle, { color: theme.text }]}>{draft.title}</Text>
+                <Text style={[styles.mealReviewDescription, { color: theme.mutedText }]} numberOfLines={2}>
+                  {draft.description || aiDescription}
+                </Text>
+
+                <View style={styles.mealReviewTotalsRow}>
+                  <View style={[styles.mealReviewTotalPill, { backgroundColor: theme.successSoft }]}>
+                    <Text style={[styles.mealReviewTotalValue, { color: theme.text }]}>{editableMealTotals.calories}</Text>
+                    <Text style={[styles.mealReviewTotalLabel, { color: theme.mutedText }]}>cal</Text>
+                  </View>
+                  <View style={[styles.mealReviewTotalPill, { backgroundColor: theme.primarySoft }]}>
+                    <Text style={[styles.mealReviewTotalValue, { color: theme.text }]}>{editableMealTotals.protein}g</Text>
+                    <Text style={[styles.mealReviewTotalLabel, { color: theme.mutedText }]}>protein</Text>
+                  </View>
+                  <View style={[styles.mealReviewTotalPill, { backgroundColor: theme.warningSoft }]}>
+                    <Text style={[styles.mealReviewTotalValue, { color: theme.text }]}>{editableMealTotals.carbs}g</Text>
+                    <Text style={[styles.mealReviewTotalLabel, { color: theme.mutedText }]}>carbs</Text>
+                  </View>
+                  <View style={[styles.mealReviewTotalPill, { backgroundColor: theme.chipBackground }]}>
+                    <Text style={[styles.mealReviewTotalValue, { color: theme.text }]}>{editableMealTotals.fat}g</Text>
+                    <Text style={[styles.mealReviewTotalLabel, { color: theme.mutedText }]}>fat</Text>
+                  </View>
+                </View>
+              </View>
+
+              <View style={styles.mealReviewSection}>
+                <Text style={[styles.mealReviewSectionTitle, { color: theme.text }]}>Ingredients</Text>
+                <Text style={[styles.mealReviewSectionHint, { color: theme.mutedText }]}>
+                  Edit quantities or nutrition values before saving.
+                </Text>
+                <View style={styles.mealReviewIngredientList}>
+                  {draft.ingredients.map((ingredient) => {
+                    return (
+                      <View
+                        key={ingredient.id}
+                        style={[
+                          styles.mealReviewIngredientCard,
+                          {
+                            backgroundColor: theme.card,
+                            borderColor: theme.cardBorder,
+                          },
+                        ]}>
+                        <View style={styles.mealReviewIngredientRow}>
+                          <View style={styles.mealReviewIngredientMain}>
+                            <Text style={[styles.mealReviewIngredientName, { color: theme.text }]}>
+                              {ingredient.name}
+                            </Text>
+                            <Text style={[styles.mealReviewIngredientMeta, { color: theme.mutedText }]}>
+                              {ingredient.quantity}
+                              {ingredient.unit} · {ingredient.calories} cal
+                            </Text>
+                            <Text style={[styles.mealReviewIngredientMacros, { color: theme.mutedText }]}>
+                              P {ingredient.protein}g · C {ingredient.carbs}g · F {ingredient.fat}g
+                            </Text>
+                          </View>
+                          <View style={styles.mealReviewIngredientActions}>
+                            <Pressable
+                              accessibilityLabel={`Edit ${ingredient.name}`}
+                              accessibilityRole="button"
+                              onPress={() => handleEditMealIngredient(ingredient)}
+                              style={({ pressed }) => [
+                                styles.mealReviewIconButton,
+                                { backgroundColor: theme.primarySoft },
+                                pressed && styles.buttonPressed,
+                              ]}>
+                              <Ionicons name="create-outline" size={18} color={theme.primary} />
+                            </Pressable>
+                            <Pressable
+                              accessibilityLabel={`Delete ${ingredient.name}`}
+                              accessibilityRole="button"
+                              onPress={() => handleDeleteMealIngredient(ingredient)}
+                              style={({ pressed }) => [
+                                styles.mealReviewIconButton,
+                                { backgroundColor: theme.dangerSoft },
+                                pressed && styles.buttonPressed,
+                              ]}>
+                              <Ionicons name="trash-outline" size={18} color={theme.danger} />
+                            </Pressable>
+                          </View>
+                        </View>
+                      </View>
+                    );
+                  })}
+                  {!hasIngredients ? (
+                    <View style={[styles.mealReviewEmptyState, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
+                      <Text style={[styles.mealReviewIngredientName, { color: theme.text }]}>No ingredients left</Text>
+                      <Text style={[styles.mealReviewIngredientMeta, { color: theme.mutedText }]}>
+                        Go back and edit the description or build the meal manually.
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+
+              <View style={styles.mealReviewActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={!hasIngredients || isSaving}
+                  onPress={() => void handleSaveEditableMealDraft()}
+                  style={({ pressed }) => [
+                    styles.buildMealGenerateButton,
+                    { backgroundColor: theme.success, shadowColor: theme.success },
+                    (!hasIngredients || isSaving) && styles.buttonDisabled,
+                    pressed && hasIngredients && !isSaving ? styles.buttonPressed : null,
+                  ]}>
+                  <Ionicons name="checkmark-circle-outline" size={18} color="#FFFFFF" />
+                  <Text style={[styles.buildMealGenerateText, { color: '#FFFFFF' }]}>
+                    {isSaving ? t('common.saving') : 'Save meal'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={handleEditAiMealDescription}
+                  style={({ pressed }) => [
+                    styles.buildMealManualButton,
+                    { backgroundColor: theme.card, borderColor: theme.cardBorder },
+                    pressed && styles.buttonPressed,
+                  ]}>
+                  <Ionicons name="create-outline" size={18} color={theme.text} />
+                  <Text style={[styles.buildMealManualText, { color: theme.text }]}>Edit description</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+            {renderIngredientEditorSheet()}
+          </View>
+        </Screen>
+      </KeyboardAvoidingView>
+    );
+  }
+
   if (activeMode === 'mealAi') {
     return renderAiAutofillScreen('meal');
+  }
+
+  if (activeMode === 'mealAiReview') {
+    return renderMealAiReviewScreen();
   }
 
   if (activeMode === 'customAi') {
@@ -3072,13 +4368,6 @@ export default function AddFoodScreen() {
   }
 
   if (activeMode === 'mealPhoto') {
-    const mealPhotoEstimate = estimateMealFromPhoto({
-      cookingFat: mealPhotoCookingFat,
-      foodType: mealPhotoFoodType,
-      portionSize: mealPhotoPortion,
-      sauce: mealPhotoSauce,
-    });
-
     return (
       <KeyboardAvoidingView
         behavior={Platform.select({ ios: 'padding', android: undefined })}
@@ -3097,9 +4386,9 @@ export default function AddFoodScreen() {
                 {renderHeaderTokenPill()}
               </View>
               <View style={styles.scanHeaderTextBlock}>
-                <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>Scan meal</Text>
+                <Text style={[styles.scanHeaderTitle, { color: theme.text }]}>{t('add.scanMeal')}</Text>
                 <Text style={[styles.scanHeaderSubtitle, { color: theme.mutedText }]}>
-                  Take or choose a meal photo, then review the estimated calories and macros before saving.
+                  {t('scanMeal.headerSubtitle')}
                 </Text>
               </View>
             </View>
@@ -3110,22 +4399,35 @@ export default function AddFoodScreen() {
               showsVerticalScrollIndicator={false}>
               {!mealPhotoUri ? (
                 <>
-                  <View style={[styles.scanMealHeroPanel, { backgroundColor: theme.cardAlt, shadowColor: theme.shadow }]}>
-                    <View style={[styles.scanMealHeroIcon, { backgroundColor: theme.success + '18' }]}>
-                      <Ionicons name="restaurant-outline" size={26} color={theme.success} />
+                  <View
+                    style={[
+                      styles.scanMealHeroPanel,
+                      {
+                        backgroundColor: theme.card,
+                        borderColor: theme.cardBorder,
+                        shadowColor: theme.shadow,
+                      },
+                    ]}>
+                    <View style={[styles.scanMealHeroAccent, { backgroundColor: theme.successSoft }]} />
+                    <View style={[styles.scanMealHeroIcon, { backgroundColor: theme.successSoft }]}>
+                      <Ionicons name="camera-outline" size={27} color={theme.successDark} />
                     </View>
                     <View style={styles.scanMealHeroText}>
                       <Text style={[styles.scanMealHeroTitle, { color: theme.text }]}>
-                        Estimate a meal from a photo
+                        {t('scanMeal.estimateTitle')}
                       </Text>
                       <Text style={[styles.scanMealHeroDescription, { color: theme.mutedText }]}>
-                        Take a clear photo of your plate or choose one from your gallery.
+                        {t('scanMeal.estimateSubtitle')}
                       </Text>
                     </View>
                     <View style={styles.scanMealBadgeRow}>
-                      {['Calories', 'Macros', 'Portion estimate'].map((label) => (
-                        <View key={label} style={[styles.scanMealBadge, { backgroundColor: theme.card }]}>
-                          <Text style={[styles.scanMealBadgeText, { color: theme.success }]}>{label}</Text>
+                      {[
+                        t('scanMeal.calories'),
+                        t('scanMeal.macros'),
+                        t('scanMeal.portionEstimate'),
+                      ].map((label) => (
+                        <View key={label} style={[styles.scanMealBadge, { backgroundColor: theme.successSoft }]}>
+                          <Text style={[styles.scanMealBadgeText, { color: theme.successDark }]}>{label}</Text>
                         </View>
                       ))}
                     </View>
@@ -3140,36 +4442,42 @@ export default function AddFoodScreen() {
                         { backgroundColor: theme.primary, shadowColor: theme.primary },
                         pressed && styles.buttonPressed,
                       ]}>
-                      <Ionicons name="camera-outline" size={18} color="#FFFFFF" />
-                      <Text style={styles.scanMealPrimaryText}>Take photo</Text>
+                      <Ionicons name="camera-outline" size={20} color="#FFFFFF" />
+                      <Text style={styles.scanMealPrimaryText}>{t('scanMeal.takePhoto')}</Text>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
                       onPress={() => selectMealPhoto('library')}
                       style={({ pressed }) => [
                         styles.scanMealSecondaryButton,
-                        { backgroundColor: theme.cardAlt },
+                        { backgroundColor: theme.card, borderColor: theme.cardBorder },
                         pressed && styles.buttonPressed,
                       ]}>
-                      <Ionicons name="image-outline" size={18} color={theme.text} />
-                      <Text style={[styles.scanMealSecondaryText, { color: theme.text }]}>Pick image</Text>
+                      <Ionicons name="image-outline" size={20} color={theme.primary} />
+                      <Text style={[styles.scanMealSecondaryText, { color: theme.text }]}>{t('scanMeal.pickImage')}</Text>
                     </Pressable>
                   </View>
 
                   <View style={styles.scanMealTipsSection}>
-                    <Text style={[styles.scanMealTipsTitle, { color: theme.text }]}>For better results</Text>
-                    <View style={[styles.scanMealTipsPanel, { backgroundColor: theme.success + '0F' }]}>
+                    <View style={styles.scanMealTipsHeader}>
+                      <Text style={[styles.scanMealTipsTitle, { color: theme.text }]}>{t('scanMeal.tipsTitle')}</Text>
+                      <Text style={[styles.scanMealTipsNote, { color: theme.mutedText }]}>{t('scanMeal.aiEstimateNote')}</Text>
+                    </View>
+                    <View style={[styles.scanMealTipsPanel, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
                       {[
-                        ['sunny-outline', 'Good lighting'],
-                        ['scan-outline', 'Show the whole plate'],
-                        ['phone-portrait-outline', 'Avoid blurry photos'],
-                        ['eye-outline', 'Keep food visible'],
-                      ].map(([icon, label]) => (
+                        ['sunny-outline', t('scanMeal.goodLighting'), t('scanMeal.goodLightingSubtitle')],
+                        ['scan-outline', t('scanMeal.showWholePlate'), t('scanMeal.showWholePlateSubtitle')],
+                        ['phone-portrait-outline', t('scanMeal.avoidBlurry'), t('scanMeal.avoidBlurrySubtitle')],
+                        ['eye-outline', t('scanMeal.photoFromAbove'), t('scanMeal.photoFromAboveSubtitle')],
+                      ].map(([icon, label, subtitle]) => (
                         <View key={label} style={styles.scanMealTipRow}>
-                          <View style={[styles.scanMealTipIcon, { backgroundColor: theme.success + '18' }]}>
+                          <View style={[styles.scanMealTipIcon, { backgroundColor: theme.successSoft }]}>
                             <Ionicons name={icon as keyof typeof Ionicons.glyphMap} size={14} color={theme.success} />
                           </View>
-                          <Text style={[styles.scanMealTipText, { color: theme.text }]}>{label}</Text>
+                          <View style={styles.scanMealTipTextBlock}>
+                            <Text style={[styles.scanMealTipText, { color: theme.text }]}>{label}</Text>
+                            <Text style={[styles.scanMealTipSubtext, { color: theme.mutedText }]}>{subtitle}</Text>
+                          </View>
                         </View>
                       ))}
                     </View>
@@ -3178,74 +4486,98 @@ export default function AddFoodScreen() {
               ) : null}
 
               {mealPhotoUri && !mealPhotoEstimateVisible ? (
-                <View style={[styles.ingredientEditor, softSurfaceStyle]}>
-                  <Text style={[styles.resultsTitle, textStyle]}>We need a few details to improve the estimate.</Text>
-                  <MealPhotoChoiceGroup
-                    label="Portion size"
-                    options={[
-                      ['small', 'Small'],
-                      ['medium', 'Medium'],
-                      ['large', 'Large'],
-                    ]}
-                    selectedValue={mealPhotoPortion}
-                    onSelect={(value) => setMealPhotoPortion(value as MealPhotoPortionSize)}
-                  />
-                  <MealPhotoChoiceGroup
-                    label="Cooking fat"
-                    options={[
-                      ['none', 'No/unknown'],
-                      ['little', 'A little oil'],
-                      ['lot', 'A lot of oil'],
-                    ]}
-                    selectedValue={mealPhotoCookingFat}
-                    onSelect={(value) => setMealPhotoCookingFat(value as MealPhotoCookingFat)}
-                  />
-                  <MealPhotoChoiceGroup
-                    label="Sauce"
-                    options={[
-                      ['none', 'No sauce'],
-                      ['light', 'Light sauce'],
-                      ['heavy', 'Heavy sauce'],
-                    ]}
-                    selectedValue={mealPhotoSauce}
-                    onSelect={(value) => setMealPhotoSauce(value as MealPhotoSauce)}
-                  />
-                  <MealPhotoChoiceGroup
-                    label="Main food type"
-                    options={[
-                      ['rice_chicken', 'Rice/chicken'],
-                      ['pasta', 'Pasta'],
-                      ['salad', 'Salad'],
-                      ['sandwich', 'Sandwich'],
-                      ['mixed', 'Mixed meal'],
-                      ['other', 'Other'],
-                    ]}
-                    selectedValue={mealPhotoFoodType}
-                    onSelect={(value) => setMealPhotoFoodType(value as MealPhotoFoodType)}
-                  />
+                <View style={[styles.mealPhotoPreviewCard, surfaceStyle]}>
+                  <Image source={{ uri: mealPhotoUri }} style={styles.mealPhotoPreviewImage} />
+                  <View style={styles.mealPhotoPreviewText}>
+                    <Text style={[styles.resultsTitle, textStyle]}>{t('scanMeal.reviewEstimate')}</Text>
+                    <Text style={[styles.scanMealHeroDescription, mutedTextStyle]}>
+                      {t('scanMeal.aiEstimateNote')}
+                    </Text>
+                  </View>
+                  {isEstimatingMealPhoto ? (
+                    <View style={[styles.mealPhotoLoadingPanel, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
+                      <ActivityIndicator color={theme.primary} />
+                      <View style={styles.mealPhotoPreviewText}>
+                        <Text style={[styles.noticeTitle, { color: theme.text }]}>{t('scanMeal.estimatingMeal')}</Text>
+                        <Text style={[styles.noticeText, { color: theme.mutedText }]}>{t('scanMeal.thisCanTakeSeconds')}</Text>
+                      </View>
+                    </View>
+                  ) : null}
+                  {mealPhotoEstimateError ? (
+                    <View style={[styles.mealPhotoLoadingPanel, { backgroundColor: theme.warningSoft, borderColor: theme.cardBorder }]}>
+                      <Ionicons name="alert-circle-outline" size={22} color={theme.warning} />
+                      <View style={styles.mealPhotoPreviewText}>
+                        <Text style={[styles.noticeTitle, { color: theme.text }]}>{t('scanMeal.estimateFailedTitle')}</Text>
+                        <Text style={[styles.noticeText, { color: theme.mutedText }]}>{mealPhotoEstimateError}</Text>
+                      </View>
+                    </View>
+                  ) : null}
                   <Pressable
                     accessibilityRole="button"
-                    onPress={() => setMealPhotoEstimateVisible(true)}
-                    style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}>
-                    <Text style={styles.buttonText}>Generate estimate</Text>
+                    disabled={isEstimatingMealPhoto || !canSpendTokens(MEAL_PHOTO_TOKEN_COST)}
+                    onPress={handleEstimateMealPhoto}
+                    style={({ pressed }) => [
+                      styles.scanMealPrimaryButton,
+                      { backgroundColor: theme.primary, shadowColor: theme.primary },
+                      (!canSpendTokens(MEAL_PHOTO_TOKEN_COST) || isEstimatingMealPhoto) && styles.disabledAction,
+                      pressed && !isEstimatingMealPhoto ? styles.buttonPressed : null,
+                    ]}>
+                    {isEstimatingMealPhoto ? <ActivityIndicator color="#FFFFFF" /> : <Ionicons name="sparkles-outline" size={20} color="#FFFFFF" />}
+                    <Text style={styles.scanMealPrimaryText}>
+                      {isEstimatingMealPhoto ? t('scanMeal.estimatingMeal') : t('scanMeal.estimateWithAi')}
+                    </Text>
                   </Pressable>
-                  <Pressable accessibilityRole="button" onPress={resetMealPhotoFlow}>
-                    <Text style={[styles.closeButtonText, { color: theme.mutedText }]}>Cancel</Text>
+                  {!canSpendTokens(MEAL_PHOTO_TOKEN_COST) ? (
+                    <Pressable accessibilityRole="button" onPress={openTokensPanel}>
+                      <Text style={[styles.closeButtonText, { color: theme.primary }]}>{t('scanMeal.notEnoughTokens')}</Text>
+                    </Pressable>
+                  ) : null}
+                  <View style={styles.secondaryRow}>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={isEstimatingMealPhoto}
+                      onPress={resetMealPhotoFlow}
+                      style={({ pressed }) => [styles.secondaryButton, { backgroundColor: theme.chipBackground }, pressed && styles.buttonPressed]}>
+                      <Text style={[styles.secondaryButtonText, { color: theme.text }]}>{t('scanMeal.retakePhoto')}</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={isEstimatingMealPhoto}
+                      onPress={() => selectMealPhoto('library')}
+                      style={({ pressed }) => [styles.secondaryButton, { backgroundColor: theme.chipBackground }, pressed && styles.buttonPressed]}>
+                      <Text style={[styles.secondaryButtonText, { color: theme.text }]}>{t('scanMeal.pickAnother')}</Text>
+                    </Pressable>
+                  </View>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={isEstimatingMealPhoto}
+                    onPress={() => setActiveMode('meal')}
+                    style={({ pressed }) => [
+                      styles.scanMealSecondaryButton,
+                      { backgroundColor: theme.card, borderColor: theme.cardBorder },
+                      pressed && styles.buttonPressed,
+                    ]}>
+                    <Ionicons name="create-outline" size={18} color={theme.primary} />
+                    <Text style={[styles.scanMealSecondaryText, { color: theme.text }]}>{t('ai.buildManually')}</Text>
+                  </Pressable>
+                  <Pressable accessibilityRole="button" disabled={isEstimatingMealPhoto} onPress={resetMealPhotoFlow}>
+                    <Text style={[styles.closeButtonText, { color: theme.mutedText }]}>{t('common.cancel')}</Text>
                   </Pressable>
                 </View>
               ) : null}
 
-              {mealPhotoUri && mealPhotoEstimateVisible ? (
+              {mealPhotoUri && mealPhotoEstimateVisible && mealPhotoAiEstimate ? (
                 <View style={styles.estimateStack}>
                   <View style={[styles.ingredientEditor, softSurfaceStyle]}>
                     {renderMealLabelSelector()}
                   </View>
                   <MealPhotoEstimateCard
-                    canSave={canSpendTokens(MEAL_PHOTO_TOKEN_COST)}
-                    estimate={mealPhotoEstimate}
+                    canSave={(mealPhotoAiEstimate.items?.length ?? 0) > 0}
+                    estimate={mealPhotoAiEstimate}
                     imageUri={mealPhotoUri}
                     onCancel={resetMealPhotoFlow}
                     onEdit={() => setMealPhotoEstimateVisible(false)}
+                    onEstimateChange={setMealPhotoAiEstimate}
                     onGetTokens={() => router.push({ pathname: '/settings', params: { panel: 'tokens' } })}
                     onRetake={resetMealPhotoFlow}
                     onSave={handleSaveMealPhotoEstimate}
@@ -3874,6 +5206,7 @@ export default function AddFoodScreen() {
           keyExtractor={getFoodKey}
           keyboardDismissMode="none"
           keyboardShouldPersistTaps="always"
+          style={styles.list}
           renderItem={renderPremiumFoodResult}
           ListHeaderComponent={
             <View style={styles.addHubStack}>
@@ -3959,7 +5292,7 @@ export default function AddFoodScreen() {
                 <Text style={[styles.resultsTitle, textStyle]}>{t('add.scanOptions')}</Text>
                 <View style={styles.primaryScanGrid}>
                   <AddQuickActionCard
-                    accentColor="#2563EB"
+                    accentColor={theme.primary}
                     delay={0}
                     icon="barcode-outline"
                     onPress={() => {
@@ -3971,7 +5304,7 @@ export default function AddFoodScreen() {
                     title={t('add.scanProduct')}
                   />
                   <AddQuickActionCard
-                    accentColor="#16A34A"
+                    accentColor={theme.success}
                     delay={70}
                     icon="camera-outline"
                     onPress={() => {
@@ -3983,7 +5316,7 @@ export default function AddFoodScreen() {
                     title={t('add.scanMeal')}
                   />
                   <AddQuickActionCard
-                    accentColor="#F97316"
+                    accentColor={theme.warning}
                     delay={140}
                     icon="restaurant-outline"
                     onPress={() => {
@@ -3995,7 +5328,7 @@ export default function AddFoodScreen() {
                     title={t('add.buildMeal')}
                   />
                   <AddQuickActionCard
-                    accentColor="#7C3AED"
+                    accentColor={theme.purple}
                     delay={210}
                     icon="create-outline"
                     onPress={() => {
@@ -5304,9 +6637,12 @@ const styles = StyleSheet.create({
   keyboardView: {
     flex: 1,
   },
+  list: {
+    flex: 1,
+  },
   listContent: {
     gap: 14,
-    paddingBottom: 156,
+    paddingBottom: 24,
   },
   searchHeader: {
     gap: 16,
@@ -5442,6 +6778,24 @@ const styles = StyleSheet.create({
     gap: 18,
     paddingBottom: 140,
   },
+  buildMealAiScrollContentCompact: {
+    gap: 14,
+  },
+  buildMealCompactBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    borderRadius: 999,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+  },
+  buildMealCompactBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
   buildMealIntroRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -5489,6 +6843,99 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     textAlignVertical: 'top',
   },
+  mealVoiceButton: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+  },
+  mealVoiceButtonText: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  mealVoiceIconButton: {
+    width: 46,
+    height: 46,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+  },
+  mealVoiceInlineStatus: {
+    marginTop: -4,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  mealVoiceRecordingBar: {
+    gap: 12,
+    borderRadius: 18,
+    padding: 12,
+  },
+  mealVoiceRecordingTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  mealVoiceRecordingInfo: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  mealVoiceRecordingDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 999,
+  },
+  mealVoiceRecordingText: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  mealVoiceLevelMeter: {
+    minWidth: 54,
+    height: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+  },
+  mealVoiceLevelBar: {
+    width: 5,
+    borderRadius: 999,
+  },
+  mealVoiceRecordingActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  mealVoiceActionButton: {
+    minHeight: 44,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+  },
+  mealVoiceActionText: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  mealVoiceStopButton: {
+    minHeight: 44,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+  },
+  mealVoiceStopText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '900',
+  },
   mealComposerInputCompact: {
     minHeight: 72,
   },
@@ -5497,6 +6944,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 10,
+  },
+  mealComposerMeta: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
   },
   mealComposerPill: {
     flexDirection: 'row',
@@ -5630,6 +7085,294 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
     lineHeight: 18,
+  },
+  mealReviewScrollContent: {
+    gap: 18,
+    paddingBottom: 140,
+  },
+  mealReviewSummaryCard: {
+    gap: 14,
+    borderWidth: 1,
+    borderRadius: 24,
+    padding: 18,
+  },
+  mealReviewBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  mealReviewBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  mealReviewBadgeText: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  mealReviewTitle: {
+    fontSize: 24,
+    fontWeight: '900',
+    lineHeight: 29,
+  },
+  mealReviewDescription: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 19,
+  },
+  mealReviewTotalsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  mealReviewTotalPill: {
+    minWidth: '47%',
+    flex: 1,
+    borderRadius: 18,
+    padding: 12,
+  },
+  mealReviewTotalValue: {
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  mealReviewTotalLabel: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  mealReviewSection: {
+    gap: 12,
+  },
+  mealReviewSectionTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  mealReviewSectionHint: {
+    marginTop: -7,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  mealReviewIngredientList: {
+    gap: 10,
+  },
+  mealReviewIngredientCard: {
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 20,
+    padding: 14,
+  },
+  mealReviewIngredientMain: {
+    flex: 1,
+    gap: 4,
+    minWidth: 0,
+  },
+  mealReviewIngredientRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  mealReviewIngredientName: {
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  mealReviewIngredientMeta: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  mealReviewIngredientMacros: {
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  mealReviewIngredientActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  mealReviewIconButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+  },
+  mealReviewEditForm: {
+    gap: 10,
+  },
+  mealReviewEditGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  mealReviewEditInput: {
+    minHeight: 46,
+    borderWidth: 1,
+    borderRadius: 15,
+    paddingHorizontal: 12,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  mealReviewEditHalf: {
+    minWidth: '47%',
+    flex: 1,
+  },
+  mealReviewEditActions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  mealReviewSmallButton: {
+    minHeight: 42,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+  },
+  mealReviewSmallButtonText: {
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  ingredientSheetOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  ingredientSheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(20, 23, 20, 0.42)',
+  },
+  ingredientSheet: {
+    maxHeight: '85%',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 10,
+    shadowOffset: { width: 0, height: -10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  ingredientSheetHandle: {
+    alignSelf: 'center',
+    width: 42,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(104, 110, 103, 0.28)',
+    marginBottom: 12,
+  },
+  ingredientSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 14,
+    paddingHorizontal: 20,
+    paddingBottom: 14,
+  },
+  ingredientSheetHeaderText: {
+    flex: 1,
+    gap: 4,
+  },
+  ingredientSheetTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  ingredientSheetSubtitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  ingredientSheetCloseButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+  },
+  ingredientSheetContent: {
+    gap: 18,
+    paddingHorizontal: 20,
+    paddingBottom: 18,
+  },
+  ingredientSheetSection: {
+    gap: 10,
+  },
+  ingredientSheetSectionTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  ingredientSheetGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  ingredientSheetField: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    gap: 6,
+    minWidth: 132,
+  },
+  ingredientSheetLabelRow: {
+    minHeight: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  ingredientSheetLabel: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  ingredientSheetUnit: {
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  ingredientSheetInput: {
+    minHeight: 54,
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 13,
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  ingredientSheetHelper: {
+    minHeight: 16,
+    fontSize: 11,
+    fontWeight: '800',
+    lineHeight: 15,
+  },
+  ingredientSheetActions: {
+    flexDirection: 'row',
+    gap: 10,
+    borderTopWidth: 1,
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: 22,
+  },
+  ingredientSheetActionButton: {
+    minHeight: 52,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+  },
+  ingredientSheetSecondaryText: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  ingredientSheetPrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  mealReviewEmptyState: {
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 20,
+    padding: 16,
+  },
+  mealReviewActions: {
+    gap: 10,
   },
   aiFoodResultPanel: {
     gap: 16,
@@ -6017,36 +7760,48 @@ const styles = StyleSheet.create({
   },
   scanMealScrollContent: {
     gap: 18,
-    paddingBottom: 140,
+    paddingBottom: 36,
   },
   scanMealHeroPanel: {
+    position: 'relative',
+    overflow: 'hidden',
     gap: 16,
+    borderWidth: 1,
     borderRadius: 24,
     padding: 20,
     shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.05,
-    shadowRadius: 22,
+    shadowOpacity: 0.06,
+    shadowRadius: 20,
     elevation: 2,
   },
+  scanMealHeroAccent: {
+    position: 'absolute',
+    top: -38,
+    right: -26,
+    width: 142,
+    height: 142,
+    borderRadius: 71,
+    opacity: 0.65,
+  },
   scanMealHeroIcon: {
-    width: 56,
-    height: 56,
+    width: 58,
+    height: 58,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 20,
+    borderRadius: 22,
   },
   scanMealHeroText: {
-    gap: 6,
+    gap: 7,
   },
   scanMealHeroTitle: {
-    fontSize: 21,
+    fontSize: 23,
     fontWeight: '900',
-    lineHeight: 27,
+    lineHeight: 29,
   },
   scanMealHeroDescription: {
     fontSize: 14,
     fontWeight: '700',
-    lineHeight: 20,
+    lineHeight: 21,
   },
   scanMealBadgeRow: {
     flexDirection: 'row',
@@ -6055,14 +7810,18 @@ const styles = StyleSheet.create({
   },
   scanMealBadge: {
     borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
   },
   scanMealBadgeText: {
     fontSize: 11,
     fontWeight: '900',
   },
   scanMealActionGroup: {
+    gap: 12,
+  },
+  secondaryRow: {
+    flexDirection: 'row',
     gap: 10,
   },
   scanMealPrimaryButton: {
@@ -6083,12 +7842,16 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '900',
   },
+  disabledAction: {
+    opacity: 0.52,
+  },
   scanMealSecondaryButton: {
     minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 9,
+    borderWidth: 1,
     borderRadius: 16,
     paddingHorizontal: 18,
   },
@@ -6096,34 +7859,89 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '900',
   },
-  scanMealTipsSection: {
-    gap: 10,
+  mealPhotoPreviewCard: {
+    gap: 16,
+    borderWidth: 1,
+    borderRadius: 24,
+    padding: 16,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.06,
+    shadowRadius: 20,
+    elevation: 2,
   },
-  scanMealTipsTitle: {
-    fontSize: 16,
+  mealPhotoPreviewImage: {
+    width: '100%',
+    height: 240,
+    borderRadius: 20,
+    backgroundColor: '#111827',
+  },
+  mealPhotoPreviewText: {
+    flex: 1,
+    gap: 5,
+  },
+  mealPhotoLoadingPanel: {
+    minHeight: 72,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+  },
+  noticeTitle: {
+    fontSize: 15,
     fontWeight: '900',
   },
+  noticeText: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  scanMealTipsSection: {
+    gap: 12,
+  },
+  scanMealTipsHeader: {
+    gap: 4,
+  },
+  scanMealTipsTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  scanMealTipsNote: {
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
   scanMealTipsPanel: {
-    gap: 10,
-    borderRadius: 18,
-    padding: 12,
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 20,
+    padding: 14,
   },
   scanMealTipRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 10,
   },
   scanMealTipIcon: {
-    width: 28,
-    height: 28,
+    width: 30,
+    height: 30,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 14,
+    borderRadius: 12,
+  },
+  scanMealTipTextBlock: {
+    flex: 1,
+    gap: 2,
   },
   scanMealTipText: {
-    flex: 1,
     fontSize: 13,
-    fontWeight: '800',
+    fontWeight: '900',
+  },
+  scanMealTipSubtext: {
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 17,
   },
   modeSwitch: {
     flexDirection: 'row',

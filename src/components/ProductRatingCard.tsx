@@ -113,7 +113,7 @@ export function ProductRatingCard({ food, onAddToToday, onDismiss }: ProductRati
         <Text style={[styles.scoreRating, { color: ratingColor }]}>{rating.label}</Text>
       </View>
 
-      <View style={[styles.conclusion, { backgroundColor: theme.cardAlt, borderColor: ratingColor }]}>
+      <View style={[styles.conclusion, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
         <View style={[styles.conclusionAccent, { backgroundColor: ratingColor }]} />
         <View style={styles.conclusionTextBlock}>
           <Text style={[styles.conclusionTitle, { color: ratingColor }]}>{description.headline}</Text>
@@ -230,13 +230,13 @@ function NutrientCard({ label, maxValue, tone = 'neutral', unit = 'g', value }: 
 
 const styles = StyleSheet.create({
   card: {
-    gap: 16,
+    gap: 18,
     borderRadius: 24,
-    padding: 18,
-    paddingBottom: 28,
+    padding: 20,
+    paddingBottom: 30,
     shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.07,
-    shadowRadius: 22,
+    shadowOpacity: 0.055,
+    shadowRadius: 24,
     elevation: 2,
   },
   summaryShell: {
@@ -249,8 +249,8 @@ const styles = StyleSheet.create({
   },
   badge: {
     borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
   },
   badgeText: {
     fontSize: 11,
@@ -276,8 +276,8 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   scoreBadge: {
-    width: 84,
-    height: 84,
+    width: 86,
+    height: 86,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 3,
@@ -301,7 +301,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
     overflow: 'hidden',
-    borderRadius: 16,
+    borderWidth: 1,
+    borderRadius: 18,
     padding: 14,
   },
   conclusionAccent: {
@@ -399,7 +400,7 @@ const styles = StyleSheet.create({
   },
   dataBox: {
     gap: 4,
-    borderRadius: 14,
+    borderRadius: 16,
     padding: 12,
   },
   dataTitle: {
@@ -422,11 +423,15 @@ const styles = StyleSheet.create({
     paddingTop: 4,
   },
   primaryButton: {
-    minHeight: 54,
+    minHeight: 56,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 16,
+    borderRadius: 18,
     paddingHorizontal: 12,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    elevation: 2,
   },
   primaryButtonText: {
     color: '#FFFFFF',
@@ -434,10 +439,10 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   secondaryButton: {
-    minHeight: 48,
+    minHeight: 50,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 14,
+    borderRadius: 16,
     paddingHorizontal: 12,
   },
   secondaryButtonText: {

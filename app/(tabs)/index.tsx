@@ -242,8 +242,11 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView
-      style={[darkStyles.safeArea, { backgroundColor: theme.background }]}
-      edges={["top", "bottom"]}
+      style={[
+        darkStyles.safeArea,
+        { backgroundColor: theme.background },
+      ]}
+      edges={["top"]}
     >
       <View style={darkStyles.header}>
         <Text style={[darkStyles.headerLabel, { color: theme.text }]}>
@@ -269,19 +272,21 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
-      <ScrollView
-        horizontal
-        pagingEnabled
-        ref={pagerRef}
-        showsHorizontalScrollIndicator={false}
-        onMomentumScrollEnd={handlePagerScrollEnd}
-        style={darkStyles.pager}
-      >
+      <View style={darkStyles.pagerArea}>
         <ScrollView
-          contentContainerStyle={[darkStyles.content, { width }]}
-          keyboardDismissMode="on-drag"
-          keyboardShouldPersistTaps="handled"
+          horizontal
+          pagingEnabled
+          ref={pagerRef}
+          showsHorizontalScrollIndicator={false}
+          onMomentumScrollEnd={handlePagerScrollEnd}
+          style={darkStyles.pager}
         >
+          <ScrollView
+            contentContainerStyle={[darkStyles.content, { width }]}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+            style={darkStyles.pageScrollView}
+          >
           <Pressable
             accessibilityRole="button"
             onPress={() => router.push({ pathname: "/daily-nutrition-detail", params: { date: today } })}
@@ -382,12 +387,7 @@ export default function HomeScreen() {
             stats={waterStats}
           />
 
-          <View
-            style={[
-              darkStyles.quickCard,
-              { backgroundColor: theme.card, borderColor: theme.cardBorder },
-            ]}
-          >
+          <View style={darkStyles.quickCard}>
             <Text style={[darkStyles.cardTitle, { color: theme.text }]}>
               {t("today.quickAdd")}
             </Text>
@@ -455,43 +455,47 @@ export default function HomeScreen() {
               />
             ))
           )}
+          </ScrollView>
+
+          <ScrollView
+            contentContainerStyle={[darkStyles.content, { width }]}
+            keyboardDismissMode="on-drag"
+            keyboardShouldPersistTaps="handled"
+            style={darkStyles.pageScrollView}
+          >
+            <WaterTracker
+              entries={waterEntries}
+              goal={waterGoalGlasses}
+              isUnlocked={waterIntakeUnlocked}
+              onAddWater={addWater}
+              onUndoLastWater={undoLastWater}
+              stats={waterStats}
+            />
+          </ScrollView>
         </ScrollView>
 
-        <ScrollView
-          contentContainerStyle={[darkStyles.content, { width }]}
-          keyboardDismissMode="on-drag"
-          keyboardShouldPersistTaps="handled"
+        <View
+          style={darkStyles.pageDots}
         >
-          <WaterTracker
-            entries={waterEntries}
-            goal={waterGoalGlasses}
-            isUnlocked={waterIntakeUnlocked}
-            onAddWater={addWater}
-            onUndoLastWater={undoLastWater}
-            stats={waterStats}
+          <View
+            style={[
+              darkStyles.pageDot,
+              {
+                backgroundColor:
+                  pageIndex === 0 ? theme.primary : theme.chipBackground,
+              },
+            ]}
           />
-        </ScrollView>
-      </ScrollView>
-
-      <View style={darkStyles.pageDots}>
-        <View
-          style={[
-            darkStyles.pageDot,
-            {
-              backgroundColor:
-                pageIndex === 0 ? theme.primary : theme.chipBackground,
-            },
-          ]}
-        />
-        <View
-          style={[
-            darkStyles.pageDot,
-            {
-              backgroundColor:
-                pageIndex === 1 ? theme.primary : theme.chipBackground,
-            },
-          ]}
-        />
+          <View
+            style={[
+              darkStyles.pageDot,
+              {
+                backgroundColor:
+                  pageIndex === 1 ? theme.primary : theme.chipBackground,
+              },
+            ]}
+          />
+        </View>
       </View>
 
       <FoodActionSheet
@@ -1350,8 +1354,7 @@ function DarkEmptyState({
   return (
     <View
       style={[
-        darkStyles.emptyCard,
-        { backgroundColor: theme.card, borderColor: theme.cardBorder },
+        darkStyles.emptyState,
       ]}
     >
       <Text style={[darkStyles.emptyTitle, { color: theme.text }]}>
@@ -1438,12 +1441,20 @@ const darkStyles = StyleSheet.create({
     backgroundColor: "#0A1020",
   },
   content: {
-    flexGrow: 1,
-    gap: 12,
-    padding: 16,
-    paddingBottom: 140,
+    gap: 16,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 44,
+  },
+  pagerArea: {
+    flex: 1,
+    minHeight: 0,
+    position: "relative",
   },
   pager: {
+    flex: 1,
+  },
+  pageScrollView: {
     flex: 1,
   },
   header: {
@@ -1452,7 +1463,7 @@ const darkStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingTop: 4,
     paddingBottom: 6,
   },
@@ -1463,13 +1474,13 @@ const darkStyles = StyleSheet.create({
     gap: 8,
   },
   headerStatsRow: {
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingBottom: 8,
   },
   pageDots: {
     position: "absolute",
     right: 0,
-    bottom: 92,
+    bottom: 8,
     left: 0,
     flexDirection: "row",
     justifyContent: "center",
@@ -1484,7 +1495,7 @@ const darkStyles = StyleSheet.create({
   undoSnackbar: {
     position: "absolute",
     right: 18,
-    bottom: 112,
+    bottom: 124,
     left: 18,
     minHeight: 56,
     flexDirection: "row",
@@ -1492,7 +1503,7 @@ const darkStyles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
     borderWidth: 1,
-    borderRadius: 16,
+    borderRadius: 20,
     paddingHorizontal: 16,
     shadowColor: "#020617",
     shadowOffset: { width: 0, height: 10 },
@@ -1534,9 +1545,9 @@ const darkStyles = StyleSheet.create({
     gap: 14,
     borderWidth: 1,
     borderColor: "#1F2A44",
-    borderRadius: 16,
+    borderRadius: 24,
     backgroundColor: "#101827",
-    padding: 15,
+    padding: 18,
   },
   calorieHeader: {
     gap: 4,
@@ -1619,7 +1630,7 @@ const darkStyles = StyleSheet.create({
     gap: 4,
     borderWidth: 1,
     borderColor: "#1F2A44",
-    borderRadius: 13,
+    borderRadius: 16,
     backgroundColor: "#111827",
     padding: 10,
   },
@@ -1646,7 +1657,7 @@ const darkStyles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     borderWidth: 1,
-    borderRadius: 16,
+    borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 9,
   },
@@ -1961,11 +1972,7 @@ const darkStyles = StyleSheet.create({
   },
   quickCard: {
     gap: 12,
-    borderWidth: 1,
-    borderColor: "#1F2A44",
-    borderRadius: 16,
-    backgroundColor: "#101827",
-    padding: 16,
+    paddingVertical: 2,
   },
   quickGrid: {
     flexDirection: "row",
@@ -2019,13 +2026,10 @@ const darkStyles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "900",
   },
-  emptyCard: {
+  emptyState: {
     gap: 6,
-    borderWidth: 1,
-    borderColor: "#1F2A44",
-    borderRadius: 16,
-    backgroundColor: "#101827",
-    padding: 18,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
   },
   emptyTitle: {
     color: "#F8FAFC",

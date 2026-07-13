@@ -1,5 +1,13 @@
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-lite';
-const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const FALLBACK_GEMINI_MODEL = 'gemini-3.5-flash';
+const DEFAULT_TEXT_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
+];
+const DEFAULT_VISION_MODELS = [
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+];
 
 export function normalizeGeminiModelName(value: string | null | undefined, fallback: string) {
   const model = value?.trim() || fallback;
@@ -37,6 +45,8 @@ export type EdgeErrorCode =
   | 'AI_PROVIDER_ERROR'
   | 'AI_QUOTA_EXCEEDED'
   | 'AI_TEMPORARILY_UNAVAILABLE'
+  | 'AI_TIMEOUT'
+  | 'NO_FOOD_DETECTED'
   | 'INVALID_AI_RESPONSE'
   | 'UNKNOWN_ERROR';
 
@@ -96,6 +106,52 @@ function getGeminiModelsToTry(primaryModel = GEMINI_MODEL, fallbackModels: strin
     .filter((model, index, models) => model && models.indexOf(model) === index);
 }
 
+function parseModelList(value: string | null | undefined) {
+  return (value ?? '')
+    .split(',')
+    .map((model) => normalizeGeminiModelName(model, ''))
+    .filter((model, index, models) => model && models.indexOf(model) === index);
+}
+
+function uniqueModels(models: Array<string | null | undefined>) {
+  return models
+    .map((model) => normalizeGeminiModelName(model, ''))
+    .filter((model, index, list) => model && list.indexOf(model) === index);
+}
+
+export function getGeminiTextModels(primaryModel?: string, fallbackModels: string[] = []) {
+  const configured = parseModelList(Deno.env.get('GEMINI_TEXT_MODELS'));
+
+  if (configured.length > 0) {
+    return uniqueModels([...configured, ...fallbackModels, ...DEFAULT_TEXT_MODELS]);
+  }
+
+  const geminiModel = normalizeGeminiModelName(primaryModel ?? Deno.env.get('GEMINI_MODEL'), '');
+
+  if (geminiModel) {
+    return uniqueModels([geminiModel, ...fallbackModels, ...DEFAULT_TEXT_MODELS]);
+  }
+
+  return DEFAULT_TEXT_MODELS;
+}
+
+export function getGeminiVisionModels(primaryModel?: string, fallbackModels: string[] = []) {
+  const configured = parseModelList(Deno.env.get('GEMINI_VISION_MODELS'));
+
+  if (configured.length > 0) {
+    return uniqueModels([...configured, ...fallbackModels, ...DEFAULT_VISION_MODELS]);
+  }
+
+  const visionModel = normalizeGeminiModelName(primaryModel ?? Deno.env.get('GEMINI_VISION_MODEL'), '');
+  const geminiModel = normalizeGeminiModelName(Deno.env.get('GEMINI_MODEL'), '');
+
+  if (visionModel || geminiModel) {
+    return uniqueModels([visionModel, geminiModel, ...fallbackModels, ...DEFAULT_VISION_MODELS]);
+  }
+
+  return DEFAULT_VISION_MODELS;
+}
+
 function safeParseJson(text: string) {
   try {
     return JSON.parse(text);
@@ -114,6 +170,89 @@ function getTemporaryUnavailableDelayMs() {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isFallbackableGeminiError(error: EdgeFunctionError) {
+  return (
+    error.code === 'AI_TEMPORARILY_UNAVAILABLE' ||
+    error.code === 'AI_TIMEOUT' ||
+    error.code === 'AI_MODEL_UNAVAILABLE' ||
+    error.code === 'INVALID_AI_RESPONSE'
+  );
+}
+
+function classifyGeminiHttpError(params: {
+  model: string;
+  response: Response;
+  payload: Record<string, unknown> | null;
+  responseText: string;
+  durationMs: number;
+}) {
+  const { durationMs, model, payload, response, responseText } = params;
+  const debug = getGeminiErrorDebug({ model, response, payload, responseText });
+  const error = payload?.error && typeof payload.error === 'object'
+    ? payload.error as Record<string, unknown>
+    : null;
+  const message =
+    (typeof error?.message === 'string' ? error.message : null) ??
+    `Gemini request failed with status ${response.status}`;
+  const errorText = `${message} ${JSON.stringify(payload ?? {})}`;
+
+  if (response.status === 429 || isQuotaErrorText(errorText)) {
+    return new EdgeFunctionError(
+      'AI_QUOTA_EXCEEDED',
+      'AI usage limit reached. Please try again later.',
+      429,
+      { ...debug, durationMs },
+    );
+  }
+
+  if (response.status === 503 || isTemporaryUnavailableErrorText(errorText)) {
+    return new EdgeFunctionError(
+      'AI_TEMPORARILY_UNAVAILABLE',
+      'AI is busy right now. Please try again in a moment or add it manually.',
+      503,
+      { ...debug, durationMs },
+    );
+  }
+
+  if ((response.status === 400 || response.status === 404) && isModelUnavailableErrorText(errorText)) {
+    return new EdgeFunctionError(
+      'AI_MODEL_UNAVAILABLE',
+      'AI model is temporarily unavailable. Please try again later.',
+      503,
+      { ...debug, durationMs },
+    );
+  }
+
+  if (response.status === 403) {
+    return new EdgeFunctionError(
+      'AI_PERMISSION_DENIED',
+      'AI access is not permitted for this key or project.',
+      403,
+      { ...debug, durationMs },
+    );
+  }
+
+  if (response.status === 400) {
+    return new EdgeFunctionError(
+      'AI_BAD_REQUEST',
+      'AI request was rejected by Gemini.',
+      400,
+      { ...debug, durationMs },
+    );
+  }
+
+  if (response.status >= 500) {
+    return new EdgeFunctionError(
+      'AI_TEMPORARILY_UNAVAILABLE',
+      'AI is busy right now. Please try again in a moment or add it manually.',
+      503,
+      { ...debug, durationMs },
+    );
+  }
+
+  return new EdgeFunctionError('GEMINI_ERROR', message, 500, { ...debug, durationMs });
 }
 
 function hasGenerateContentSupport(model: GeminiModelInfo) {
@@ -140,7 +279,6 @@ export async function listAvailableGeminiModels(apiKey: string): Promise<GeminiM
   console.log('[Gemini] list models request', {
     apiVersion: 'v1beta',
     hasApiKey: Boolean(apiKey),
-    apiKeyPrefix: apiKey ? apiKey.slice(0, 6) : null,
   });
 
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
@@ -181,9 +319,7 @@ export async function listAvailableGeminiModels(apiKey: string): Promise<GeminiM
 export function pickBestGenerateContentModel(models: GeminiModelInfo[]) {
   const priority = [
     'gemini-3.1-flash-lite',
-    'gemini-3-flash',
     'gemini-3.5-flash',
-    'gemini-flash-latest',
   ];
   const candidates = models
     .filter(hasGenerateContentSupport)
@@ -226,6 +362,239 @@ function getGeminiErrorDebug(params: {
   };
 }
 
+export function extractGeminiText(payload: unknown) {
+  const response = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  const candidates = Array.isArray(response.candidates) ? response.candidates : [];
+  const candidate = candidates[0] && typeof candidates[0] === 'object'
+    ? candidates[0] as Record<string, unknown>
+    : null;
+  const content = candidate?.content && typeof candidate.content === 'object'
+    ? candidate.content as Record<string, unknown>
+    : null;
+  const parts = Array.isArray(content?.parts) ? content.parts : [];
+  const firstPart = parts[0] && typeof parts[0] === 'object'
+    ? parts[0] as Record<string, unknown>
+    : null;
+
+  return {
+    text: typeof firstPart?.text === 'string' ? firstPart.text : '',
+    finishReason: typeof candidate?.finishReason === 'string' ? candidate.finishReason : undefined,
+    candidateCount: candidates.length,
+  };
+}
+
+export function parseGeminiJsonText(text: string) {
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  const jsonText =
+    firstBrace >= 0 && lastBrace > firstBrace
+      ? cleaned.slice(firstBrace, lastBrace + 1)
+      : cleaned;
+
+  return JSON.parse(jsonText);
+}
+
+export async function callGeminiWithFallback<T>({
+  models,
+  onAttempt,
+  onFailure,
+  onSuccess,
+  payloadBuilder,
+  parseResponse,
+  taskType,
+  timeoutMs = 12_000,
+}: {
+  models: string[];
+  onAttempt?: (event: { model: string; attempt: number }) => void;
+  onFailure?: (event: { model: string; attempt: number; error: EdgeFunctionError }) => void;
+  onSuccess?: (event: { model: string }) => void;
+  payloadBuilder: (model: string) => unknown;
+  parseResponse: (payload: unknown, model: string) => T;
+  taskType: string;
+  timeoutMs?: number;
+}): Promise<T & { provider: 'gemini'; model: string; isDemo: false }> {
+  const apiKey = Deno.env.get('GEMINI_API_KEY');
+
+  if (!apiKey) {
+    console.error('[Gemini] Missing GEMINI_API_KEY Supabase secret.');
+    throw new EdgeFunctionError('MISSING_AI_PROVIDER_KEY', 'Gemini API key is not configured.');
+  }
+
+  const modelsToTry = uniqueModels(models);
+  console.log('[Gemini] resolved fallback models:', modelsToTry);
+  let lastFallbackableError: EdgeFunctionError | null = null;
+  const failures: Array<{
+    model: string;
+    attempt: number;
+    code: string;
+    status: number;
+    messagePreview: string;
+    rawPreview?: string;
+    parsedPreview?: string;
+    finalReason?: unknown;
+  }> = [];
+
+  function recordFailure(model: string, attempt: number, error: EdgeFunctionError) {
+    const failure = {
+      model,
+      attempt,
+      code: error.code,
+      status: error.status,
+      messagePreview: error.message.slice(0, 200),
+      ...(typeof error.debug?.rawPreview === 'string' ? { rawPreview: error.debug.rawPreview.slice(0, 1000) } : {}),
+      ...(typeof error.debug?.parsedPreview === 'string' ? { parsedPreview: error.debug.parsedPreview.slice(0, 1000) } : {}),
+      ...('finalReason' in (error.debug ?? {}) ? { finalReason: error.debug?.finalReason } : {}),
+    };
+    failures.push(failure);
+    onFailure?.({ model, attempt, error });
+  }
+
+  for (const model of modelsToTry) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      console.log('[Gemini] attempt', { taskType, model, attempt });
+      onAttempt?.({ model, attempt });
+
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify(payloadBuilder(model)),
+          },
+        );
+        const responseText = await response.text();
+        const payload = responseText ? safeParseJson(responseText) : null;
+        const durationMs = getDurationMs(startedAt);
+
+        if (!response.ok) {
+          const error = classifyGeminiHttpError({
+            model,
+            response,
+            payload: payload && typeof payload === 'object' && !Array.isArray(payload)
+              ? payload as Record<string, unknown>
+              : null,
+            responseText,
+            durationMs,
+          });
+
+          console.warn('[Gemini] model failed', {
+            taskType,
+            model,
+            attempt,
+            code: error.code,
+            status: error.status,
+          });
+          recordFailure(model, attempt, error);
+
+          if (error.code === 'AI_TEMPORARILY_UNAVAILABLE' && attempt === 1) {
+            await sleep(700);
+            continue;
+          }
+
+          if (isFallbackableGeminiError(error)) {
+            lastFallbackableError = error;
+            break;
+          }
+
+          throw error;
+        }
+
+        const result = parseResponse(payload, model);
+        console.log('[Gemini] success', { taskType, model, durationMs });
+        onSuccess?.({ model });
+        return {
+          ...result,
+          provider: 'gemini',
+          model,
+          isDemo: false,
+        };
+      } catch (error) {
+        const durationMs = getDurationMs(startedAt);
+
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          const timeoutError = new EdgeFunctionError(
+            'AI_TIMEOUT',
+            'AI is taking too long. Please try again.',
+            504,
+            { model, taskType, durationMs, timeoutMs },
+          );
+          console.warn('[Gemini] model failed', {
+            taskType,
+            model,
+            attempt,
+            code: timeoutError.code,
+            status: timeoutError.status,
+          });
+          recordFailure(model, attempt, timeoutError);
+
+          if (attempt === 1) {
+            await sleep(700);
+            continue;
+          }
+
+          lastFallbackableError = timeoutError;
+          break;
+        }
+
+        if (error instanceof EdgeFunctionError) {
+          console.warn('[Gemini] model failed', {
+            taskType,
+            model,
+            attempt,
+            code: error.code,
+            status: error.status,
+          });
+          recordFailure(model, attempt, error);
+
+          if (error.code === 'AI_TEMPORARILY_UNAVAILABLE' && attempt === 1) {
+            await sleep(700);
+            continue;
+          }
+
+          if (isFallbackableGeminiError(error)) {
+            lastFallbackableError = error;
+            break;
+          }
+        }
+
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  if (lastFallbackableError) {
+    if (Deno.env.get('DEBUG_AI') === 'true') {
+      lastFallbackableError.debug = {
+        ...lastFallbackableError.debug,
+        triedModels: modelsToTry,
+        failures,
+      };
+    }
+
+    throw lastFallbackableError;
+  }
+
+  throw new EdgeFunctionError(
+    'AI_MODEL_UNAVAILABLE',
+    'No compatible AI model is available for this project.',
+    503,
+    Deno.env.get('DEBUG_AI') === 'true' ? { triedModels: modelsToTry, failures } : undefined,
+  );
+}
+
 async function callGeminiJsonWithModel(
   prompt: string,
   responseSchema: GeminiSchema,
@@ -245,7 +614,6 @@ async function callGeminiJsonWithModel(
     endpointModelPath: `models/${model}:generateContent`,
     apiVersion: 'v1beta',
     hasApiKey: Boolean(apiKey),
-    apiKeyPrefix: apiKey ? apiKey.slice(0, 6) : null,
   });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const controller = new AbortController();
@@ -418,7 +786,18 @@ async function callGeminiJsonWithModel(
       message: error instanceof Error ? error.message : String(error),
       textPreview: text.slice(0, 240),
     });
-    throw new EdgeFunctionError('INVALID_AI_RESPONSE', 'Gemini returned invalid JSON.');
+    throw new EdgeFunctionError(
+      'INVALID_AI_RESPONSE',
+      'Gemini returned invalid JSON.',
+      422,
+      Deno.env.get('DEBUG_AI') === 'true'
+        ? {
+          model,
+          rawPreview: text.slice(0, 1000),
+          finalReason: 'json_parse_failed',
+        }
+        : { model },
+    );
   }
 }
 
@@ -435,9 +814,12 @@ export async function callGeminiJson(
     throw new EdgeFunctionError('MISSING_AI_PROVIDER_KEY', 'Gemini API key is not configured.');
   }
 
-  let modelUnavailableError: EdgeFunctionError | null = null;
+  let fallbackError: EdgeFunctionError | null = null;
 
-  const modelsToTry = getGeminiModelsToTry(primaryModel, options.fallbackModels);
+  const modelsToTry = Deno.env.get('GEMINI_TEXT_MODELS')
+    ? getGeminiTextModels(primaryModel, options.fallbackModels)
+    : getGeminiModelsToTry(primaryModel, options.fallbackModels);
+  console.log('[Gemini] resolved fallback models:', modelsToTry);
 
   for (const model of modelsToTry) {
     try {
@@ -454,18 +836,28 @@ export async function callGeminiJson(
           delayMs,
         });
         await sleep(delayMs);
-        return await callGeminiJsonWithModel(prompt, responseSchema, model, {
-          ...options,
-          retryTemporaryUnavailable: false,
-        });
+        try {
+          return await callGeminiJsonWithModel(prompt, responseSchema, model, {
+            ...options,
+            retryTemporaryUnavailable: false,
+          });
+        } catch (retryError) {
+          if (retryError instanceof EdgeFunctionError && isFallbackableGeminiError(retryError)) {
+            fallbackError = retryError;
+            continue;
+          }
+
+          throw retryError;
+        }
       }
 
-      if (error instanceof EdgeFunctionError && error.code === 'AI_MODEL_UNAVAILABLE') {
-        modelUnavailableError = error;
+      if (error instanceof EdgeFunctionError && isFallbackableGeminiError(error)) {
+        fallbackError = error;
         const nextModel = modelsToTry[modelsToTry.indexOf(model) + 1];
         if (nextModel) {
           console.warn('[Gemini] Retrying with fallback model', {
             failedModel: model,
+            code: error.code,
             fallbackModel: nextModel,
           });
           continue;
@@ -476,7 +868,7 @@ export async function callGeminiJson(
     }
   }
 
-  throw modelUnavailableError ??
+  throw fallbackError ??
     new EdgeFunctionError('AI_MODEL_UNAVAILABLE', 'AI model is temporarily unavailable. Please try again later.', 503);
 }
 
@@ -497,7 +889,6 @@ export async function probeGeminiModels(models: string[]) {
       endpointModelPath: `models/${model}:generateContent`,
       apiVersion: 'v1beta',
       hasApiKey: Boolean(apiKey),
-      apiKeyPrefix: apiKey ? apiKey.slice(0, 6) : null,
     });
 
     const response = await fetch(

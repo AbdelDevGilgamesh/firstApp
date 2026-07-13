@@ -49,9 +49,10 @@ type SupabaseFunctionError = Error & {
   context?: unknown;
 };
 type FunctionErrorBody = {
+  status?: string;
   error?: string;
   code?: string;
-  debug?: {
+  debug?: Record<string, unknown> & {
     model?: string;
     status?: number;
     errorStatus?: string | null;
@@ -312,6 +313,16 @@ function logFunctionInvokeError(
     errorCode: getFunctionErrorDebug(responseBody)?.errorCode,
     errorMessage: getFunctionErrorDebug(responseBody)?.errorMessage,
   });
+
+  if (functionName === 'ai-meal-estimate') {
+    console.warn('[AI Autofill] meal estimate failed', {
+      functionName,
+      code: getFunctionErrorCode(responseBody),
+      status: context?.status,
+      responseBody,
+      debug: getFunctionErrorDebug(responseBody),
+    });
+  }
 }
 
 async function invokeAiAutofillFunction(functionName: AiFunctionName, description: string) {

@@ -18,6 +18,21 @@ export type MealPhotoEstimate = {
   fat: number;
   confidence: 'Low estimate confidence' | 'Medium estimate confidence';
   explanation: string;
+  provider?: 'gemini' | 'demo';
+  model?: string | null;
+  isDemo?: boolean;
+  items?: Array<{
+    id: string;
+    name: string;
+    estimatedQuantity: string;
+    calories: number;
+    protein: number;
+    carbs: number;
+    fat: number;
+    confidence: 'low' | 'medium' | 'high';
+    notes: string[];
+  }>;
+  notes?: string[];
 };
 
 const BASE_ESTIMATES: Record<

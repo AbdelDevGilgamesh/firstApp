@@ -1,24 +1,43 @@
-import React from 'react';
-import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { Tabs } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from "@expo/vector-icons";
+import { Tabs } from "expo-router";
+import React from "react";
+import { StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useLanguage } from '@/src/context/LanguageContext';
-import { useAppTheme } from '@/src/theme/appTheme';
+import { useLanguage } from "@/src/context/LanguageContext";
+import { useAppTheme } from "@/src/theme/appTheme";
 
-// You can explore the built-in icon families and icons on the web at https://icons.expo.fyi/
 function TabBarIcon(props: {
-  name: React.ComponentProps<typeof FontAwesome>['name'];
-  color: string;
+  activeName: React.ComponentProps<typeof Ionicons>["name"];
+  inactiveName: React.ComponentProps<typeof Ionicons>["name"];
+  focused: boolean;
+  theme: ReturnType<typeof useAppTheme>;
 }) {
-  return <FontAwesome size={28} style={{ marginBottom: -3 }} {...props} />;
+  const iconColor = props.focused ? props.theme.primary : props.theme.mutedText;
+
+  return (
+    <View
+      style={[
+        styles.iconContainer,
+        props.focused && {
+          backgroundColor: props.theme.primarySoft,
+        },
+      ]}
+    >
+      <Ionicons
+        color={iconColor}
+        name={props.focused ? props.activeName : props.inactiveName}
+        size={23}
+      />
+    </View>
+  );
 }
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const theme = useAppTheme();
   const { t } = useLanguage();
-  const bottomInset = Math.max(insets.bottom, 12);
+  const bottomInset = insets.bottom > 0 ? insets.bottom : 6;
 
   return (
     <Tabs
@@ -26,50 +45,100 @@ export default function TabLayout() {
         headerShown: false,
         tabBarActiveTintColor: theme.primary,
         tabBarInactiveTintColor: theme.mutedText,
+        tabBarHideOnKeyboard: true,
+        tabBarItemStyle: styles.tabBarItem,
+        tabBarIconStyle: styles.tabBarIcon,
         tabBarStyle: {
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
           backgroundColor: theme.tabBarBackground,
           borderTopColor: theme.tabBarBorder,
-          height: 64 + bottomInset,
+          borderTopWidth: 1,
+          height: 62 + bottomInset,
           paddingBottom: bottomInset,
-          paddingTop: 8,
+          paddingTop: 6,
+          shadowColor: "transparent",
+          shadowOpacity: 0,
+          elevation: 0,
         },
         tabBarLabelStyle: {
-          fontSize: 12,
-          fontWeight: '700',
+          fontSize: 11,
+          fontWeight: "800",
+          marginTop: 0,
         },
-      }}>
+      }}
+    >
       <Tabs.Screen
         name="index"
         options={{
-          title: t('tabs.today'),
-          tabBarIcon: ({ color }) => <TabBarIcon name="home" color={color} />,
+          title: t("tabs.today"),
+          tabBarIcon: ({ focused }) => (
+            <TabBarIcon
+              activeName="home"
+              focused={focused}
+              inactiveName="home-outline"
+              theme={theme}
+            />
+          ),
         }}
       />
       <Tabs.Screen
         name="add"
         options={{
-          title: t('tabs.add'),
-          tabBarIcon: ({ color }) => <TabBarIcon name="plus-circle" color={color} />,
+          title: t("tabs.add"),
+          tabBarIcon: ({ focused }) => (
+            <TabBarIcon
+              activeName="add-circle"
+              focused={focused}
+              inactiveName="add-circle-outline"
+              theme={theme}
+            />
+          ),
         }}
       />
       <Tabs.Screen
         name="history"
         options={{
-          title: t('tabs.history'),
-          tabBarIcon: ({ color }) => <TabBarIcon name="calendar" color={color} />,
+          title: t("tabs.history"),
+          tabBarIcon: ({ focused }) => (
+            <TabBarIcon
+              activeName="calendar"
+              focused={focused}
+              inactiveName="calendar-outline"
+              theme={theme}
+            />
+          ),
         }}
       />
       <Tabs.Screen
         name="settings"
         options={{
-          title: t('tabs.settings'),
-          tabBarIcon: ({ color }) => <TabBarIcon name="sliders" color={color} />,
+          title: t("tabs.settings"),
+          tabBarIcon: ({ focused }) => (
+            <TabBarIcon
+              activeName="settings"
+              focused={focused}
+              inactiveName="settings-outline"
+              theme={theme}
+            />
+          ),
         }}
       />
     </Tabs>
   );
 }
+
+const styles = StyleSheet.create({
+  iconContainer: {
+    width: 38,
+    height: 30,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 14,
+  },
+  tabBarIcon: {
+    marginTop: 0,
+  },
+  tabBarItem: {
+    minHeight: 48,
+    paddingVertical: 0,
+  },
+});

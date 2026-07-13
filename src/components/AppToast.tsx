@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAppTheme } from '@/src/theme/appTheme';
@@ -50,6 +50,10 @@ const TOAST_META: Record<
   },
 };
 
+const SWIPE_DISMISS_DISTANCE = 88;
+const SWIPE_DISMISS_VELOCITY = 0.85;
+const SWIPE_DISMISS_OFFSET = 420;
+
 export function AppToast({
   duration = 5000,
   message,
@@ -62,6 +66,7 @@ export function AppToast({
   const theme = useAppTheme();
   const insets = useSafeAreaInsets();
   const opacity = useRef(new Animated.Value(0)).current;
+  const toastTranslateX = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(-24)).current;
   const progressAnim = useRef(new Animated.Value(1)).current;
   const [isDismissed, setIsDismissed] = useState(false);
@@ -73,14 +78,34 @@ export function AppToast({
   const displayMessage = title ? message : null;
   const meta = TOAST_META[type];
   const iconText = type === 'success' ? String.fromCharCode(10003) : meta.icon;
-  const accentColor = theme.isDark ? meta.darkAccent : meta.accent;
-  const backgroundColor = theme.isDark ? meta.darkBackground : meta.background;
+  const accentColor =
+    type === 'success'
+      ? theme.success
+      : type === 'warning'
+        ? theme.warning
+        : type === 'error'
+          ? theme.danger
+          : theme.primary;
+  const backgroundColor =
+    type === 'success'
+      ? theme.successSoft
+      : type === 'warning'
+        ? theme.warningSoft
+        : type === 'error'
+          ? theme.dangerSoft
+          : theme.primarySoft;
+  const dragOpacity = toastTranslateX.interpolate({
+    inputRange: [-120, 0, 120],
+    outputRange: [0.65, 1, 0.65],
+    extrapolate: 'clamp',
+  });
 
   useEffect(() => {
     setIsDismissed(false);
+    toastTranslateX.setValue(0);
     translateY.setValue(-24);
     progressAnim.setValue(1);
-  }, [message, progressAnim, title, translateY, type]);
+  }, [message, progressAnim, title, toastTranslateX, translateY, type]);
 
   useEffect(() => {
     if (isVisible) {
@@ -137,6 +162,73 @@ export function AppToast({
     });
   }
 
+  function resumeDismissTimer() {
+    if (!isVisible || !duration || duration <= 0) {
+      return;
+    }
+
+    progressAnim.stopAnimation((currentValue) => {
+      const remainingDuration = Math.max(600, Math.round(duration * Number(currentValue)));
+
+      Animated.timing(progressAnim, {
+        duration: remainingDuration,
+        easing: Easing.linear,
+        toValue: 0,
+        useNativeDriver: false,
+      }).start();
+
+      dismissTimeoutRef.current = setTimeout(dismissToast, remainingDuration);
+    });
+  }
+
+  const panResponder = PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) =>
+        Math.abs(gestureState.dx) > 8 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+      onPanResponderGrant: () => {
+        if (dismissTimeoutRef.current) {
+          clearTimeout(dismissTimeoutRef.current);
+          dismissTimeoutRef.current = null;
+        }
+        progressAnim.stopAnimation();
+        toastTranslateX.stopAnimation();
+      },
+      onPanResponderMove: (_, gestureState) => {
+        toastTranslateX.setValue(gestureState.dx);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const shouldDismiss =
+          Math.abs(gestureState.dx) > SWIPE_DISMISS_DISTANCE ||
+          Math.abs(gestureState.vx) > SWIPE_DISMISS_VELOCITY;
+
+        if (shouldDismiss) {
+          const direction = gestureState.dx === 0 ? (gestureState.vx >= 0 ? 1 : -1) : Math.sign(gestureState.dx);
+
+          Animated.timing(toastTranslateX, {
+            duration: 180,
+            easing: Easing.out(Easing.cubic),
+            toValue: direction * SWIPE_DISMISS_OFFSET,
+            useNativeDriver: true,
+          }).start(dismissToast);
+          return;
+        }
+
+        Animated.spring(toastTranslateX, {
+          damping: 16,
+          stiffness: 180,
+          toValue: 0,
+          useNativeDriver: true,
+        }).start(resumeDismissTimer);
+      },
+      onPanResponderTerminate: () => {
+        Animated.spring(toastTranslateX, {
+          damping: 16,
+          stiffness: 180,
+          toValue: 0,
+          useNativeDriver: true,
+        }).start(resumeDismissTimer);
+      },
+  });
+
   useEffect(() => {
     if (!isVisible || !duration || duration <= 0) {
       return undefined;
@@ -181,14 +273,18 @@ export function AppToast({
             transform: [{ translateY }],
           },
         ]}>
-        <View
+        <Animated.View
+          accessibilityHint="Swipe left or right to dismiss"
           pointerEvents="auto"
+          {...panResponder.panHandlers}
           style={[
             styles.toast,
             {
               backgroundColor,
               shadowColor: theme.shadow,
+              opacity: dragOpacity,
               paddingTop: 12,
+              transform: [{ translateX: toastTranslateX }],
             },
           ]}>
           <View style={[styles.iconBubble, { backgroundColor: theme.isDark ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.72)' }]}>
@@ -227,7 +323,7 @@ export function AppToast({
               />
             </View>
           ) : null}
-        </View>
+        </Animated.View>
       </Animated.View>
     </View>
   );

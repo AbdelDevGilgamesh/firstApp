@@ -9,6 +9,7 @@ import {
 } from "react-native";
 
 import { PressableScale } from "@/src/components/PressableScale";
+import { useAppTheme } from "@/src/theme/appTheme";
 import { FoodEntry } from "@/src/types";
 
 type FoodRowProps = {
@@ -85,7 +86,29 @@ export function FoodRow({
   onSwipeStart,
   variant = "light",
 }: FoodRowProps) {
+  const theme = useAppTheme();
   const isDark = variant === "dark";
+  const rowTheme = isDark
+    ? {
+        avatar: theme.chipBackground,
+        border: theme.cardBorder,
+        calories: theme.primary,
+        card: theme.card,
+        macro: theme.mutedText,
+        muted: theme.mutedText,
+        shadowOpacity: 0,
+        text: theme.text,
+      }
+    : {
+        avatar: theme.chipBackground,
+        border: theme.cardBorder,
+        calories: theme.success,
+        card: theme.card,
+        macro: theme.mutedText,
+        muted: theme.mutedText,
+        shadowOpacity: 0.045,
+        text: theme.text,
+      };
   const canSwipeDelete = deleteMode === "swipe" && Boolean(onDelete);
   const canShowActions = deleteMode === "actions" && Boolean(onOpenActions);
   const translateX = useRef(new Animated.Value(0)).current;
@@ -165,6 +188,7 @@ export function FoodRow({
       style={[
         styles.swipeContainer,
         {
+          backgroundColor: theme.danger,
           opacity: entrance,
           transform: [{ translateY: entranceTranslateY }],
         },
@@ -184,8 +208,13 @@ export function FoodRow({
       <Animated.View
         style={[
           styles.row,
-          isDark && styles.rowDark,
-          { transform: [{ translateX }] },
+          {
+            backgroundColor: rowTheme.card,
+            borderColor: rowTheme.border,
+            shadowColor: theme.shadow,
+            shadowOpacity: rowTheme.shadowOpacity,
+            transform: [{ translateX }],
+          },
         ]}
         {...(canSwipeDelete ? panResponder.panHandlers : {})}
       >
@@ -200,35 +229,50 @@ export function FoodRow({
           }}
           onPress={() => onEdit?.(entry)}
           style={styles.rowPressable}
+          wrapperStyle={styles.rowPressableWrapper}
         >
-          <View style={[styles.avatar, isDark && styles.avatarDark]}>
+          <View style={[styles.avatar, { backgroundColor: rowTheme.avatar }]}>
             <Text style={styles.avatarText}>{getFoodAvatar(entry.name)}</Text>
           </View>
           <View style={styles.nameGroup}>
             <Text
               numberOfLines={1}
-              style={[styles.name, isDark && styles.nameDark]}
+              style={[styles.name, { color: rowTheme.text }]}
             >
               {entry.name}
             </Text>
             {quantityLabel ? (
               <Text
                 numberOfLines={1}
-                style={[styles.quantity, isDark && styles.quantityDark]}
+                style={[styles.quantity, { color: rowTheme.muted }]}
               >
                 {quantityLabel}
               </Text>
             ) : (
-              <Text style={[styles.quantity, isDark && styles.quantityDark]}>
+              <Text style={[styles.quantity, { color: rowTheme.muted }]}>
                 Logged serving
               </Text>
             )}
-            <Text style={[styles.macros, isDark && styles.macrosDark]}>
+            <Text
+              ellipsizeMode="tail"
+              numberOfLines={1}
+              style={[styles.macros, { color: rowTheme.macro }]}
+            >
               P {formatMacro(entry.protein)}g / C {formatMacro(entry.carbs)}g /
               F {formatMacro(entry.fat)}g
             </Text>
           </View>
           <View style={styles.trailing}>
+            <View style={styles.calorieGroup}>
+              <Text style={[styles.calories, { color: rowTheme.calories }]}>
+                {entry.calories}
+              </Text>
+              <Text
+                style={[styles.calorieLabel, { color: rowTheme.muted }]}
+              >
+                cal
+              </Text>
+            </View>
             {canShowActions ? (
               <Pressable
                 accessibilityLabel="Food actions"
@@ -240,17 +284,9 @@ export function FoodRow({
                 }}
                 style={({ pressed }) => [styles.menuButton, pressed && styles.rowPressed]}
               >
-                <Text style={[styles.menuText, isDark && styles.menuTextDark]}>...</Text>
+                <Text style={[styles.menuText, { color: rowTheme.muted }]}>...</Text>
               </Pressable>
             ) : null}
-            <Text style={[styles.calories, isDark && styles.caloriesDark]}>
-              {entry.calories}
-            </Text>
-            <Text
-              style={[styles.calorieLabel, isDark && styles.calorieLabelDark]}
-            >
-              cal
-            </Text>
           </View>
         </PressableScale>
       </Animated.View>
@@ -261,7 +297,8 @@ export function FoodRow({
 const styles = StyleSheet.create({
   swipeContainer: {
     overflow: "hidden",
-    borderRadius: 16,
+    borderRadius: 20,
+    marginBottom: 12,
   },
   swipeDelete: {
     position: "absolute",
@@ -271,10 +308,10 @@ const styles = StyleSheet.create({
     width: 96,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#B95C3A",
+    backgroundColor: "#C2413A",
   },
   swipeDeletePressed: {
-    backgroundColor: "#9E482B",
+    backgroundColor: "#9F332E",
   },
   swipeDeleteText: {
     color: "#FFFFFF",
@@ -282,16 +319,13 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
   row: {
-    minHeight: 92,
-    borderWidth: 1,
-    borderColor: "#E5E7DD",
-    borderRadius: 16,
-    backgroundColor: "#FFFFFF",
-    shadowColor: "#1E1F24",
+    minHeight: 86,
+    borderWidth: 0,
+    borderRadius: 0,
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.06,
+    shadowOpacity: 0,
     shadowRadius: 18,
-    elevation: 2,
+    elevation: 0,
   },
   rowDark: {
     borderColor: "#253047",
@@ -299,13 +333,17 @@ const styles = StyleSheet.create({
     shadowOpacity: 0,
     elevation: 0,
   },
+  rowPressableWrapper: {
+    width: "100%",
+  },
   rowPressable: {
-    minHeight: 92,
+    minHeight: 86,
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingLeft: 14,
+    paddingRight: 10,
+    paddingVertical: 13,
   },
   rowPressed: {
     opacity: 0.82,
@@ -327,6 +365,8 @@ const styles = StyleSheet.create({
   nameGroup: {
     flex: 1,
     gap: 4,
+    minWidth: 0,
+    marginRight: 6,
   },
   name: {
     color: "#1E1F24",
@@ -353,15 +393,24 @@ const styles = StyleSheet.create({
     color: "#CBD5E1",
   },
   trailing: {
-    minWidth: 62,
+    minWidth: 100,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginLeft: 4,
+  },
+  calorieGroup: {
+    minWidth: 48,
     alignItems: "flex-end",
   },
   menuButton: {
-    minWidth: 34,
-    minHeight: 26,
-    alignItems: "flex-end",
+    width: 42,
+    height: 42,
+    alignItems: "center",
     justifyContent: "center",
-    marginBottom: 2,
+    borderRadius: 14,
+    backgroundColor: "rgba(104, 110, 103, 0.11)",
   },
   menuText: {
     color: "#6B6F76",

@@ -48,11 +48,7 @@ function getAiFoodAutofillGeminiModel(model?: string) {
 
   const configuredModel = normalizeGeminiModelName(Deno.env.get('AI_FOOD_AUTOFILL_MODEL'), '');
 
-  if (
-    configuredModel &&
-    configuredModel !== 'gemini-2.5-flash' &&
-    configuredModel !== 'gemini-2.5-flash-lite'
-  ) {
+  if (configuredModel) {
     return configuredModel;
   }
 
@@ -338,13 +334,28 @@ function normalizeIngredient(value: unknown, index: number) {
 
 function normalizeMealEstimate(payload: unknown, description: string) {
   const estimate = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-  const ingredients = Array.isArray(estimate.ingredients)
-    ? estimate.ingredients.map(normalizeIngredient).slice(0, 12)
+  const rawIngredients = Array.isArray(estimate.ingredients)
+    ? estimate.ingredients
+    : Array.isArray(estimate.items)
+      ? estimate.items
+      : [];
+  const ingredients = rawIngredients.length > 0
+    ? rawIngredients.map(normalizeIngredient).slice(0, 12)
     : [];
 
   if (ingredients.length === 0) {
     console.error('[AI Provider] Validation failed: no usable ingredients.');
-    throw new EdgeFunctionError('INVALID_AI_RESPONSE', 'AI provider returned no usable ingredients.');
+    throw new EdgeFunctionError(
+      'INVALID_AI_RESPONSE',
+      'AI provider returned no usable ingredients.',
+      422,
+      Deno.env.get('DEBUG_AI') === 'true'
+        ? {
+          parsedPreview: JSON.stringify(estimate).slice(0, 1000),
+          finalReason: 'missing_ingredients',
+        }
+        : undefined,
+    );
   }
 
   const totals = ingredients.reduce(

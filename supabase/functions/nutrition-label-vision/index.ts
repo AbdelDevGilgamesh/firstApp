@@ -51,8 +51,33 @@ class FunctionError extends Error {
 
 const MAX_BASE64_LENGTH = 5_000_000;
 const MAX_OUTPUT_TOKENS = 1024;
-const PRIMARY_MODEL = Deno.env.get('GEMINI_VISION_MODEL') || 'gemini-2.5-flash-lite';
-const FALLBACK_MODEL = Deno.env.get('GEMINI_VISION_FALLBACK_MODEL') || 'gemini-2.5-flash';
+const PRIMARY_MODEL = Deno.env.get('GEMINI_VISION_MODEL') || 'gemini-3.5-flash';
+const FALLBACK_MODEL = Deno.env.get('GEMINI_VISION_FALLBACK_MODEL') || 'gemini-3.1-flash-lite';
+const DEFAULT_VISION_MODELS = [
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+];
+
+function normalizeModelName(value: string | null | undefined) {
+  return value?.trim().replace(/^models\//, '') ?? '';
+}
+
+function getVisionModelsToTry() {
+  const configured = (Deno.env.get('GEMINI_VISION_MODELS') ?? '')
+    .split(',')
+    .map(normalizeModelName)
+    .filter(Boolean);
+  const models = configured.length > 0
+    ? configured
+    : [
+      normalizeModelName(PRIMARY_MODEL),
+      normalizeModelName(FALLBACK_MODEL),
+      normalizeModelName(Deno.env.get('GEMINI_MODEL')),
+      ...DEFAULT_VISION_MODELS,
+    ];
+
+  return models.filter((model, index) => model && models.indexOf(model) === index);
+}
 
 const responseSchema = {
   type: 'object',
@@ -554,13 +579,8 @@ Deno.serve(async (request) => {
 
   try {
     const input = await readRequest(request);
-    const liteResult = await callGeminiVision({ ...input, model: PRIMARY_MODEL });
-
-    if (hasUsableData(liteResult.data) && liteResult.data?.confidence !== 'low') {
-      return jsonResponse({ success: true, model: liteResult.model, data: liteResult.data });
-    }
-
-    let flashResult: {
+    const modelsToTry = getVisionModelsToTry();
+    const results: Array<{
       data: NutritionLabelData | null;
       invalidJson: boolean;
       model: string;
@@ -568,41 +588,37 @@ Deno.serve(async (request) => {
       truncated?: boolean;
       finishReason?: string;
       textLength?: number;
-    } | null = null;
+    }> = [];
 
-    if (FALLBACK_MODEL && FALLBACK_MODEL !== PRIMARY_MODEL) {
-      if (liteResult.invalidJson || liteResult.truncated || !hasUsableData(liteResult.data)) {
-        console.warn('[Nutrition Vision] Flash Lite failed, retrying Flash', {
-          code: liteResult.truncated
-            ? 'AI_RESPONSE_TRUNCATED'
-            : liteResult.invalidJson
-              ? 'INVALID_AI_RESPONSE'
-              : 'NO_NUTRITION_VALUES_FOUND',
-          stage: liteResult.truncated || liteResult.invalidJson ? 'parse_response' : 'no_values',
-          finishReason: liteResult.finishReason,
-        });
-      }
+    for (const model of modelsToTry) {
+      try {
+        const result = await callGeminiVision({ ...input, model });
+        results.push(result);
 
-      flashResult = await callGeminiVision({ ...input, model: FALLBACK_MODEL }).catch((error) => {
+        if (hasUsableData(result.data) && result.data?.confidence !== 'low') {
+          return jsonResponse({ success: true, model: result.model, data: result.data });
+        }
+      } catch (error) {
         if (error instanceof FunctionError && error.code === 'AI_TEMPORARILY_UNAVAILABLE') {
-          console.warn('[nutrition-label-vision] Fallback model temporarily unavailable.');
-          return null;
+          console.warn('[nutrition-label-vision] Vision model temporarily unavailable, trying next model.', {
+            model,
+          });
+          continue;
         }
 
         throw error;
-      });
+      }
     }
 
-    if (hasUsableData(flashResult?.data ?? null)) {
-      return jsonResponse({ success: true, model: flashResult?.model, data: flashResult?.data });
+    const bestUsableResult = results.find((result) => hasUsableData(result.data));
+
+    if (bestUsableResult?.data) {
+      return jsonResponse({ success: true, model: bestUsableResult.model, data: bestUsableResult.data });
     }
 
-    if (hasUsableData(liteResult.data)) {
-      return jsonResponse({ success: true, model: liteResult.model, data: liteResult.data });
-    }
+    const truncatedResult = results.find((result) => result.truncated);
 
-    if (liteResult.truncated || flashResult?.truncated) {
-      const truncatedResult = flashResult?.truncated ? flashResult : liteResult;
+    if (truncatedResult) {
       return errorResponse(
         new FunctionError(
           'AI_RESPONSE_TRUNCATED',
@@ -619,7 +635,9 @@ Deno.serve(async (request) => {
       );
     }
 
-    if (liteResult.invalidJson || flashResult?.invalidJson) {
+    const invalidJsonResult = results.find((result) => result.invalidJson);
+
+    if (invalidJsonResult) {
       return errorResponse(
         new FunctionError(
           'INVALID_AI_RESPONSE',
@@ -627,10 +645,10 @@ Deno.serve(async (request) => {
           422,
           'parse_response',
           {
-            model: flashResult?.invalidJson ? flashResult.model : liteResult.model,
-            finishReason: flashResult?.invalidJson ? flashResult.finishReason : liteResult.finishReason,
-            textLength: flashResult?.invalidJson ? flashResult.textLength : liteResult.textLength,
-            rawPreview: flashResult?.rawPreview ?? liteResult.rawPreview,
+            model: invalidJsonResult.model,
+            finishReason: invalidJsonResult.finishReason,
+            textLength: invalidJsonResult.textLength,
+            rawPreview: invalidJsonResult.rawPreview,
           },
         ),
       );
@@ -642,7 +660,7 @@ Deno.serve(async (request) => {
         'No nutrition values were found. Try a clearer photo or add it manually.',
         422,
         'normalize_response',
-        { model: flashResult?.model ?? liteResult.model },
+        { model: results[results.length - 1]?.model ?? modelsToTry[modelsToTry.length - 1] },
       ),
     );
   } catch (error) {

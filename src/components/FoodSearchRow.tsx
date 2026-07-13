@@ -46,7 +46,7 @@ function MacroPill({ color, label, value }: { color: string; label: string; valu
 
 export function FoodSearchRow({ food, isFavorite, onPress, onToggleFavorite }: FoodSearchRowProps) {
   const theme = useAppTheme();
-  const calorieColor = theme.isDark ? '#86EFAC' : '#2F7D5C';
+  const calorieColor = theme.success;
 
   return (
     <PressableScale
@@ -60,7 +60,7 @@ export function FoodSearchRow({ food, isFavorite, onPress, onToggleFavorite }: F
           borderBottomColor: theme.cardBorder,
         },
       ]}>
-      <View style={[styles.iconTile, { backgroundColor: theme.isDark ? '#20304A' : '#F1F5FF' }]}>
+      <View style={[styles.iconTile, { backgroundColor: theme.primarySoft }]}>
         <Ionicons color={theme.primary} name={getIconName(food.category)} size={19} />
       </View>
 
@@ -73,9 +73,9 @@ export function FoodSearchRow({ food, isFavorite, onPress, onToggleFavorite }: F
           {food.unit}
         </Text>
         <View style={styles.macroRow}>
-          <MacroPill color="#2563EB" label="P" value={food.protein} />
-          <MacroPill color="#C96D1D" label="C" value={food.carbs} />
-          <MacroPill color="#9A6B12" label="F" value={food.fat} />
+          <MacroPill color={theme.primary} label="P" value={food.protein} />
+          <MacroPill color={theme.warning} label="C" value={food.carbs} />
+          <MacroPill color={theme.successDark} label="F" value={food.fat} />
         </View>
       </View>
 
@@ -96,7 +96,7 @@ export function FoodSearchRow({ food, isFavorite, onPress, onToggleFavorite }: F
             scaleTo={0.9}
             style={styles.starButton}>
             <Ionicons
-              color={isFavorite ? '#F59E0B' : theme.mutedText}
+              color={isFavorite ? theme.warning : theme.mutedText}
               name={isFavorite ? 'star' : 'star-outline'}
               size={18}
             />

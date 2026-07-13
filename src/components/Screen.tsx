@@ -13,16 +13,25 @@ export function Screen({ children, scroll = true }: ScreenProps) {
 
   if (!scroll) {
     return (
-      <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]} edges={['top', 'bottom']}>
-        <View style={styles.content}>{children}</View>
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]} edges={['top']}>
+        <View style={[styles.content, { paddingHorizontal: theme.spacing.screenHorizontal }]}>
+          {children}
+        </View>
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]} edges={['top', 'bottom']}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]} edges={['top']}>
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        style={styles.scrollView}
+        contentContainerStyle={[
+          styles.scrollContent,
+          {
+            gap: theme.spacing.lg,
+            paddingHorizontal: theme.spacing.screenHorizontal,
+          },
+        ]}
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled">
         {children}
@@ -38,12 +47,13 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    padding: 16,
+    paddingVertical: 16,
+  },
+  scrollView: {
+    flex: 1,
   },
   scrollContent: {
-    flexGrow: 1,
-    gap: 12,
-    padding: 16,
-    paddingBottom: 136,
+    paddingTop: 16,
+    paddingBottom: 24,
   },
 });

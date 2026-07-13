@@ -138,7 +138,11 @@ export default function HistoryScreen() {
               onPress={() => setSelectedDate(summary.date)}
               style={({ pressed }) => [
                 styles.dayRow,
-                { backgroundColor: theme.card, borderColor: theme.cardBorder },
+                {
+                  backgroundColor: isSelected ? theme.text : theme.card,
+                  borderColor: isSelected ? theme.text : theme.cardBorder,
+                  shadowColor: theme.shadow,
+                },
                 isSelected && styles.dayRowSelected,
                 pressed && styles.dayRowPressed,
               ]}>
@@ -181,28 +185,36 @@ function WeeklyStatsSection({ stats }: { stats: WeeklyStats }) {
   const theme = useAppTheme();
 
   return (
-    <View style={[styles.weeklyCard, { backgroundColor: theme.card, borderColor: theme.cardBorder }]}>
+    <View
+      style={[
+        styles.weeklyCard,
+        {
+          backgroundColor: theme.card,
+          borderColor: theme.cardBorder,
+          shadowColor: theme.shadow,
+        },
+      ]}>
       <View style={styles.weeklyHeader}>
         <Text style={[styles.sectionTitle, { color: theme.text }]}>This week</Text>
         <Text style={[styles.weeklySubtle, { color: theme.mutedText }]}>{stats.trackedDaysCount} days tracked</Text>
       </View>
 
       <View style={styles.statGrid}>
-        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
           <Text style={[styles.statLabel, { color: theme.mutedText }]}>Total</Text>
           <Text style={[styles.statValue, { color: theme.text }]}>{stats.totalCalories} cal</Text>
         </View>
-        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
           <Text style={[styles.statLabel, { color: theme.mutedText }]}>Average/day</Text>
           <Text style={[styles.statValue, { color: theme.text }]}>{stats.averageCalories} cal</Text>
         </View>
-        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
           <Text style={[styles.statLabel, { color: theme.mutedText }]}>Highest day</Text>
           <Text style={[styles.statValue, { color: theme.text }]}>
             {stats.highestDay ? `${stats.highestDay.label}: ${stats.highestDay.totalCalories}` : 'None yet'}
           </Text>
         </View>
-        <View style={[styles.statTile, { backgroundColor: theme.cardAlt }]}>
+        <View style={[styles.statTile, { backgroundColor: theme.cardAlt, borderColor: theme.cardBorder }]}>
           <Text style={[styles.statLabel, { color: theme.mutedText }]}>Tracked</Text>
           <Text style={[styles.statValue, { color: theme.text }]}>{stats.trackedDaysCount} / 7 days</Text>
         </View>
@@ -233,7 +245,7 @@ function WeeklyStatsSection({ stats }: { stats: WeeklyStats }) {
 
 const styles = StyleSheet.create({
   section: {
-    gap: 12,
+    gap: 14,
   },
   sectionTitle: {
     color: '#1E1F24',
@@ -248,9 +260,13 @@ const styles = StyleSheet.create({
     gap: 16,
     borderWidth: 1,
     borderColor: 'transparent',
-    borderRadius: 8,
+    borderRadius: 18,
     backgroundColor: '#FFFFFF',
     padding: 16,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.035,
+    shadowRadius: 14,
+    elevation: 1,
   },
   dayRowSelected: {
     backgroundColor: '#1E1F24',
@@ -292,16 +308,16 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   weeklyCard: {
-    gap: 16,
+    gap: 18,
     borderWidth: 1,
     borderColor: 'transparent',
-    borderRadius: 8,
+    borderRadius: 24,
     backgroundColor: '#FFFFFF',
-    padding: 16,
+    padding: 18,
     shadowColor: '#1E1F24',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.05,
+    shadowRadius: 20,
     elevation: 2,
   },
   weeklyHeader: {
@@ -323,9 +339,10 @@ const styles = StyleSheet.create({
   statTile: {
     minWidth: '47%',
     flex: 1,
-    borderRadius: 8,
+    borderWidth: 1,
+    borderRadius: 16,
     backgroundColor: '#F7F7F2',
-    padding: 12,
+    padding: 13,
   },
   statLabel: {
     color: '#6B6F76',
@@ -348,7 +365,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
-    borderRadius: 8,
+    borderRadius: 15,
     backgroundColor: '#FAFAF7',
     paddingHorizontal: 12,
     paddingVertical: 10,
